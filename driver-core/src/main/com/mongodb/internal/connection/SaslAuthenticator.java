@@ -16,6 +16,8 @@
 
 package com.mongodb.internal.connection;
 
+import com.mongodb.AuthenticationMechanism;
+import com.mongodb.MongoCredential;
 import com.mongodb.MongoException;
 import com.mongodb.MongoInterruptedException;
 import com.mongodb.MongoSecurityException;
@@ -330,8 +332,52 @@ abstract class SaslAuthenticator extends Authenticator implements SpeculativeAut
                 disposeOfSaslClient(saslClient);
             }
         }
-
     }
 
+    protected abstract static class SaslClientImpl implements SaslClient {
+        private final MongoCredential credential;
+
+        public SaslClientImpl(final MongoCredential credential) {
+            this.credential = credential;
+        }
+
+        @Override
+        public boolean hasInitialResponse() {
+            return true;
+        }
+
+        @Override
+        public byte[] unwrap(final byte[] bytes, final int i, final int i1) {
+            throw new UnsupportedOperationException("Not implemented.");
+        }
+
+        @Override
+        public byte[] wrap(final byte[] bytes, final int i, final int i1) {
+            throw new UnsupportedOperationException("Not implemented.");
+        }
+
+        @Override
+        public Object getNegotiatedProperty(final String s) {
+            throw new UnsupportedOperationException("Not implemented.");
+        }
+
+        @Override
+        public void dispose() {
+            // nothing to do
+        }
+
+        @Override
+        public final String getMechanismName() {
+            AuthenticationMechanism authMechanism = getCredential().getAuthenticationMechanism();
+            if (authMechanism == null) {
+                throw new IllegalArgumentException("Authentication mechanism cannot be null");
+            }
+            return authMechanism.getMechanismName();
+        }
+
+        protected MongoCredential getCredential() {
+            return credential;
+        }
+    }
 }
 

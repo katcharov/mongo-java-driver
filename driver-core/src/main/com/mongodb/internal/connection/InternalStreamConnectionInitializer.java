@@ -82,8 +82,21 @@ public class InternalStreamConnectionInitializer implements InternalConnectionIn
         notNull("internalConnection", internalConnection);
         notNull("description", description);
 
-        authenticate(internalConnection, description.getConnectionDescription());
+        final ConnectionDescription connectionDescription = description.getConnectionDescription();
+        if (shouldAuthenticate(connectionDescription)) {
+            authenticator.authenticate(internalConnection, connectionDescription);
+        }
         return completeConnectionDescriptionInitialization(internalConnection, description);
+    }
+
+    @Override
+    public void reauthenticate(
+            final InternalStreamConnection internalStreamConnection,
+            final ConnectionDescription connectionDescription) {
+        if (shouldAuthenticate(connectionDescription)) {
+            authenticator.getMongoCredentialWithCache().clearCache();
+            authenticator.authenticate(internalStreamConnection, connectionDescription);
+        }
     }
 
     @Override
@@ -105,11 +118,12 @@ public class InternalStreamConnectionInitializer implements InternalConnectionIn
     public void finishHandshakeAsync(final InternalConnection internalConnection,
                                      final InternalConnectionInitializationDescription description,
                                      final SingleResultCallback<InternalConnectionInitializationDescription> callback) {
-        if (authenticator == null || description.getConnectionDescription().getServerType()
-                == ServerType.REPLICA_SET_ARBITER) {
+        ConnectionDescription connectionDescription = description.getConnectionDescription();
+
+        if (!shouldAuthenticate(connectionDescription)) {
             completeConnectionDescriptionInitializationAsync(internalConnection, description, callback);
         } else {
-            authenticator.authenticateAsync(internalConnection, description.getConnectionDescription(),
+            authenticator.authenticateAsync(internalConnection, connectionDescription,
                     (result1, t1) -> {
                         if (t1 != null) {
                             callback.onResult(null, t1);
@@ -118,6 +132,23 @@ public class InternalStreamConnectionInitializer implements InternalConnectionIn
                         }
                     });
         }
+    }
+
+    @Override
+    public void reauthenticateAsync(
+            final InternalStreamConnection internalStreamConnection,
+            final ConnectionDescription connectionDescription,
+            final SingleResultCallback<Void> callback) {
+        if (shouldAuthenticate(connectionDescription)) {
+            authenticator.getMongoCredentialWithCache().clearCache();
+            authenticator.authenticateAsync(internalStreamConnection, connectionDescription, callback);
+        } else {
+            callback.onResult(null, null);
+        }
+    }
+
+    private boolean shouldAuthenticate(final ConnectionDescription connectionDescription) {
+        return authenticator != null && connectionDescription.getServerType() != ServerType.REPLICA_SET_ARBITER;
     }
 
     private InternalConnectionInitializationDescription initializeConnectionDescription(final InternalConnection internalConnection) {
@@ -198,12 +229,6 @@ public class InternalStreamConnectionInitializer implements InternalConnectionIn
                 new BsonDocument("getlasterror", new BsonInt32(1)), clusterConnectionMode, serverApi,
                 internalConnection),
                 description);
-    }
-
-    private void authenticate(final InternalConnection internalConnection, final ConnectionDescription connectionDescription) {
-        if (authenticator != null && connectionDescription.getServerType() != ServerType.REPLICA_SET_ARBITER) {
-            authenticator.authenticate(internalConnection, connectionDescription);
-        }
     }
 
     private void setSpeculativeAuthenticateResponse(final BsonDocument helloResult) {

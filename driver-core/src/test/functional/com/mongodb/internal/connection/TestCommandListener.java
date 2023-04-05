@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 
 import static com.mongodb.ClusterFixture.TIMEOUT;
 import static com.mongodb.internal.connection.InternalStreamConnection.getSecuritySensitiveCommands;
@@ -107,6 +108,17 @@ public class TestCommandListener implements CommandListener {
         } finally {
             lock.unlock();
         }
+    }
+
+    public List<String> getEventStrings() {
+        return this.getEvents().stream().map(c -> {
+            String className = c.getClass().getSimpleName()
+                    .replace("Command", "")
+                    .replace("Event", "")
+                    .toLowerCase();
+            // example: "saslContinue succeeded"
+            return c.getCommandName() + " " + className;
+        }).collect(Collectors.toList());
     }
 
     public CommandStartedEvent getCommandStartedEvent(final String commandName) {

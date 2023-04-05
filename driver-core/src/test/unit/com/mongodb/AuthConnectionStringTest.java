@@ -16,10 +16,13 @@
 
 package com.mongodb;
 
+import com.mongodb.internal.connection.OidcAuthenticator;
 import com.mongodb.lang.Nullable;
 import junit.framework.TestCase;
+import org.bson.BsonArray;
 import org.bson.BsonDocument;
 import org.bson.BsonNull;
+import org.bson.BsonString;
 import org.bson.BsonValue;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -32,6 +35,9 @@ import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+
+import static com.mongodb.MongoCredential.REFRESH_TOKEN_CALLBACK;
+import static com.mongodb.MongoCredential.REQUEST_TOKEN_CALLBACK;
 
 // See https://github.com/mongodb/specifications/tree/master/source/auth/tests
 @RunWith(Parameterized.class)
@@ -111,6 +117,26 @@ public class AuthConnectionStringTest extends TestCase {
         ConnectionString connectionString;
         connectionString = new ConnectionString(input);
         MongoCredential credential = connectionString.getCredential();
+        if (credential != null) {
+            BsonArray callbacks = (BsonArray) getExpectedValue("callback");
+            if (callbacks != null) {
+                for (BsonValue v : callbacks) {
+                    String string = ((BsonString) v).getValue();
+                    if ("oidcRequest".equals(string)) {
+                        credential = credential.withMechanismProperty(
+                                REQUEST_TOKEN_CALLBACK,
+                                (MongoCredential.RequestCallback) (principalName, serverInfo, timeoutSeconds) -> null);
+                    } else if ("oidcRefresh".equals(string)) {
+                        credential = credential.withMechanismProperty(
+                                REFRESH_TOKEN_CALLBACK,
+                                (MongoCredential.RefreshCallback) (principalName, serverInfo, cachedTokenResult, timeoutSeconds) -> null);
+                    } else {
+                        fail("Unsupported callback: " + string);
+                    }
+                }
+            }
+            OidcAuthenticator.OidcValidator.validateBeforeUse(credential);
+        }
         return credential;
     }
 
@@ -157,6 +183,14 @@ public class AuthConnectionStringTest extends TestCase {
                 }
             } else if ((document.get(key).isBoolean())) {
                 boolean expectedValue = document.getBoolean(key).getValue();
+                if (REQUEST_TOKEN_CALLBACK.equals(key)) {
+                    assertTrue(actualMechanismProperty instanceof MongoCredential.RequestCallback);
+                    return;
+                }
+                if (REFRESH_TOKEN_CALLBACK.equals(key)) {
+                    assertTrue(actualMechanismProperty instanceof MongoCredential.RefreshCallback);
+                    return;
+                }
                 assertNotNull(actualMechanismProperty);
                 assertEquals(expectedValue, actualMechanismProperty);
             } else {

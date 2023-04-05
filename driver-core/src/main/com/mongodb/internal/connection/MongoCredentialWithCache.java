@@ -65,6 +65,10 @@ public class MongoCredentialWithCache {
         cache.set(key, value);
     }
 
+    public void clearCache() {
+        cache.clear();
+    }
+
     public <V> V withLock(final Supplier<V> k) {
         return Locks.withLock(cache.lock, k);
     }
@@ -87,6 +91,13 @@ public class MongoCredentialWithCache {
             Locks.withLock(lock, () -> {
                 cacheKey = key;
                 cacheValue = value;
+            });
+        }
+
+        public void clear() {
+            Locks.withLock(lock, () -> {
+                cacheKey = null;
+                cacheValue = null;
             });
         }
     }

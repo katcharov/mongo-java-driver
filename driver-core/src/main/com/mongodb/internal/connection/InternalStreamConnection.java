@@ -18,6 +18,7 @@ package com.mongodb.internal.connection;
 
 import com.mongodb.LoggerSettings;
 import com.mongodb.MongoClientException;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoCompressor;
 import com.mongodb.MongoException;
 import com.mongodb.MongoInternalException;
@@ -347,8 +348,25 @@ public class InternalStreamConnection implements InternalConnection {
     @Override
     public <T> T sendAndReceive(final CommandMessage message, final Decoder<T> decoder, final SessionContext sessionContext,
                                 final RequestContext requestContext, final OperationContext operationContext) {
-        CommandEventSender commandEventSender;
+        try {
+            return sendAndReceiveInternal(message, decoder, sessionContext, requestContext, operationContext);
+        } catch (MongoCommandException e) {
+            if (triggersReauthentication(e)) {
+                connectionInitializer.reauthenticate(this, this.description);
+                return sendAndReceiveInternal(message, decoder, sessionContext, requestContext, operationContext);
+            }
+            throw e;
+        }
+    }
 
+    @Nullable
+    private <T> T sendAndReceiveInternal(
+            final CommandMessage message,
+            final Decoder<T> decoder,
+            final SessionContext sessionContext,
+            final RequestContext requestContext,
+            final OperationContext operationContext) {
+        CommandEventSender commandEventSender;
         try (ByteBufferBsonOutput bsonOutput = new ByteBufferBsonOutput(this)) {
             message.encode(bsonOutput, sessionContext);
             commandEventSender = createCommandEventSender(message, bsonOutput, requestContext, operationContext);
@@ -461,14 +479,52 @@ public class InternalStreamConnection implements InternalConnection {
                 commandEventSender.sendFailedEvent(e);
             }
             throw e;
-    }
+        }
     }
 
     @Override
-    public <T> void sendAndReceiveAsync(final CommandMessage message, final Decoder<T> decoder, final SessionContext sessionContext,
-            final RequestContext requestContext, final OperationContext operationContext, final SingleResultCallback<T> callback) {
+    public <T> void sendAndReceiveAsync(
+            final CommandMessage message,
+            final Decoder<T> decoder,
+            final SessionContext sessionContext,
+            final RequestContext requestContext,
+            final OperationContext operationContext,
+            final SingleResultCallback<T> callback) {
         notNull("stream is open", stream, callback);
 
+        SingleResultCallback<T> retryingCallback = (T r, Throwable t) -> {
+            if (triggersReauthentication(t)) {
+                connectionInitializer.reauthenticateAsync(this, this.description, (result1, t1) -> {
+                    if (t1 != null) {
+                        callback.onResult(null, t1);
+                    } else {
+                        sendAndReceiveAsyncInternal(
+                                message, decoder, sessionContext, requestContext, operationContext, callback);
+                    }
+                });
+                return;
+            }
+            callback.onResult(r, t);
+        };
+        sendAndReceiveAsyncInternal(
+                message, decoder, sessionContext, requestContext, operationContext, retryingCallback);
+    }
+
+    private boolean triggersReauthentication(@Nullable final Throwable t) {
+        if (t instanceof MongoCommandException) {
+            MongoCommandException e = (MongoCommandException) t;
+            return e.getErrorCode() == 391; // TODO-OIDC extract constant
+        }
+        return false;
+    }
+
+    private <T> void sendAndReceiveAsyncInternal(
+            final CommandMessage message,
+            final Decoder<T> decoder,
+            final SessionContext sessionContext,
+            final RequestContext requestContext,
+            final OperationContext operationContext,
+            final SingleResultCallback<T> callback) {
         if (isClosed()) {
             callback.onResult(null, new MongoSocketClosedException("Can not read from a closed socket", getServerAddress()));
             return;

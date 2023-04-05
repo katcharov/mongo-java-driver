@@ -16,6 +16,7 @@
 
 package com.mongodb.internal.connection;
 
+import com.mongodb.connection.ConnectionDescription;
 import com.mongodb.internal.async.SingleResultCallback;
 
 interface InternalConnectionInitializer {
@@ -30,4 +31,13 @@ interface InternalConnectionInitializer {
 
     void finishHandshakeAsync(InternalConnection internalConnection, InternalConnectionInitializationDescription description,
                               SingleResultCallback<InternalConnectionInitializationDescription> callback);
+
+    void reauthenticate(
+            InternalStreamConnection internalStreamConnection,
+            ConnectionDescription connectionDescription);
+
+    void reauthenticateAsync(
+            InternalStreamConnection internalStreamConnection,
+            ConnectionDescription connectionDescription,
+            SingleResultCallback<Void> callback);
 }
