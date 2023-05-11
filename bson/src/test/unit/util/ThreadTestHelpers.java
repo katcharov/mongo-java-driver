@@ -19,6 +19,7 @@ package util;
 import org.opentest4j.MultipleFailuresError;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -30,15 +31,19 @@ public final class ThreadTestHelpers {
     }
 
     public static void executeAll(final int nThreads, final Runnable c) {
+        executeAll(Collections.nCopies(nThreads, c).toArray(new Runnable[0]));
+    }
+
+    public static void executeAll(final Runnable... runnables) {
         ExecutorService service = null;
         try {
             service = Executors.newFixedThreadPool(10);
-            CountDownLatch latch = new CountDownLatch(nThreads);
+            CountDownLatch latch = new CountDownLatch(runnables.length);
             List<Throwable> failures = new ArrayList<>();
-            for (int i = 0; i < nThreads; i++) {
+            for (final Runnable runnable : runnables) {
                 service.submit(() -> {
                     try {
-                        c.run();
+                        runnable.run();
                     } catch (Throwable e) {
                         failures.add(e);
                     } finally {

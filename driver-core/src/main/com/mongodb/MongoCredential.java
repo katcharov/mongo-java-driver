@@ -20,7 +20,6 @@ import com.mongodb.annotations.Beta;
 import com.mongodb.annotations.Immutable;
 import com.mongodb.lang.Nullable;
 import org.bson.BsonDocument;
-import org.bson.BsonString;
 import org.bson.conversions.Bson;
 
 import java.util.Arrays;
@@ -29,7 +28,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 import static com.mongodb.AuthenticationMechanism.GSSAPI;
 import static com.mongodb.AuthenticationMechanism.MONGODB_AWS;
@@ -202,6 +200,17 @@ public final class MongoCredential {
     public static final String REFRESH_TOKEN_CALLBACK = "REFRESH_TOKEN_CALLBACK";
 
     /**
+     *
+     */
+    public static final String ALLOWED_HOSTS = "ALLOWED_HOSTS";
+
+    /**
+     *
+     */
+    public static final List<String> DEFAULT_ALLOWED_HOSTS = Arrays.asList(
+            "*.mongodb.net", "*.mongodb-dev.net", "*.mongodbgov.net", "localhost", "127.0.0.1", "::1");
+
+    /**
      * Creates a MongoCredential instance with an unspecified mechanism.  The client will negotiate the best mechanism based on the
      * version of the server that the client is authenticating to.
      *
@@ -349,42 +358,8 @@ public final class MongoCredential {
         return new MongoCredential(MONGODB_AWS, userName, "$external", password);
     }
 
-    /**
-     *
-     * @param userName
-     * @param request
-     * @param refresh
-     * @return
-     */
-    public static MongoCredential createOidcCredential(
-            @Nullable final String userName,
-            final RequestCallback request,
-            @Nullable final RefreshCallback refresh) {
-        MongoCredential mongoCredential = createOidcCredentialInternal(userName)
-                .withMechanismProperty(REQUEST_TOKEN_CALLBACK, request);
-        if (refresh != null) {
-            mongoCredential = mongoCredential
-                    .withMechanismProperty(REFRESH_TOKEN_CALLBACK, refresh);
-        }
-        return mongoCredential;
-    }
-
-    /**
-     *
-     * @param providerName
-     * @return
-     */
-    public static MongoCredential createOidcCredential(final String providerName) {
-        return createOidcCredentialInternal(null)
-                .withMechanismProperty(PROVIDER_NAME, providerName);
-    }
-
-    /**
-     *
-     * @param userName
-     * @return
-     */
-    static MongoCredential createOidcCredentialInternal(@Nullable final String userName) {
+    // TODO-OIDC docs
+    public static MongoCredential createOidcCredential(@Nullable final String userName) {
         return new MongoCredential(MONGODB_OIDC, userName, "$external", null);
     }
 
@@ -398,6 +373,7 @@ public final class MongoCredential {
      * @since 2.12
      */
     public <T> MongoCredential withMechanismProperty(final String key, final T value) {
+        // TODO-OIDC prevent setting incorrect types?
         return new MongoCredential(this, key, value);
     }
 
@@ -618,19 +594,19 @@ public final class MongoCredential {
                 + '}';
     }
 
-    // TODO-OIDC
+    // TODO-OIDC docs
     public interface RequestCallback {
-        OidcTokens callback(
+        IdPServerResponse onRequest(
                 @Nullable String principalName,
                 IdpServerInfo serverInfo,
                 int timeoutSeconds);
     }
 
     public interface RefreshCallback {
-        OidcTokens callback(
+        IdPServerResponse onRefresh(
                 @Nullable String principalName,
                 IdpServerInfo serverInfo,
-                OidcTokens tokens,
+                String refreshToken,
                 int timeoutSeconds);
     }
 
@@ -645,6 +621,12 @@ public final class MongoCredential {
         private final String clientId;
         @Nullable
         private final List<String> requestScopes;
+
+        public IdpServerInfo(final String issuer, final String clientId, @Nullable final List<String> requestScopes) {
+            this.issuer = issuer;
+            this.clientId = clientId;
+            this.requestScopes = requestScopes;
+        }
 
         /**
          * URL which describes the Authorization Server. This identifier should
@@ -670,40 +652,12 @@ public final class MongoCredential {
             return requestScopes;
         }
 
-        public IdpServerInfo(final Bson bson) {
-            // TODO-OIDC move to internal?
-            BsonDocument c = bson.toBsonDocument();
-            this.issuer = getString(c, "issuer");
-            this.clientId = getString(c, "clientId");
-            this.requestScopes = getStringArray(c, "requestScopes");
-        }
-
-        @Nullable
-        private static String getString(final BsonDocument document, final String key) {
-            if (!document.containsKey(key) || document.isString(key)) {
-                return null;
-            }
-            return document.getString(key).getValue();
-        }
-
-        @Nullable
-        private static List<String> getStringArray(final BsonDocument document, final String key) {
-            if (!document.containsKey(key) || document.isString(key)) {
-                return null;
-            }
-            List<String> result = document.getArray(key).getValues().stream()
-                    // ignore non-string values from server, rather than error
-                    .filter(v -> v.isString())
-                    .map(v -> v.asString().getValue())
-                    .collect(Collectors.toList());
-            return Collections.unmodifiableList(result);
-        }
     }
 
     /**
      * The result of a token request
      */
-    public static class OidcTokens {
+    public static final class IdPServerResponse {
 
         private final String accessToken;
 
@@ -734,18 +688,14 @@ public final class MongoCredential {
             return refreshToken;
         }
 
-        public OidcTokens(
+        public IdPServerResponse(
                 final String accessToken,
                 @Nullable final Integer expiresInSeconds,
                 @Nullable final String refreshToken) {
+            notNull("accessToken", accessToken);
             this.accessToken = accessToken;
             this.expiresInSeconds = expiresInSeconds;
             this.refreshToken = refreshToken;
-        }
-
-        public final BsonDocument toBsonDocument() { // TODO-OIDC move to internal?
-            return new BsonDocument()
-                    .append("jwt", new BsonString(getAccessToken()));
         }
     }
 }

@@ -41,13 +41,10 @@ public class OidcAuthenticationAsyncProseTests extends OidcAuthenticationProseTe
         // not a prose spec test
         blockNextFind();
 
-        TestCallback requestCallback = createCallback();
-        TestCallback refreshCallback = createCallback();
-        requestCallback.setExpiresInSeconds(60);
-
         int simulatedDelayMs = 100;
-        requestCallback.setSimulatedDelayInMilliseconds(simulatedDelayMs);
-        refreshCallback.setSimulatedDelayInMilliseconds(simulatedDelayMs);
+        TestCallback requestCallback = createExpiredCallback().setDelayMs(simulatedDelayMs);
+        TestCallback refreshCallback = createCallback().setDelayMs(simulatedDelayMs);
+
         MongoClientSettings clientSettings = createClientSettings(OIDC_URL, requestCallback, refreshCallback);
 
         try (com.mongodb.reactivestreams.client.MongoClient client = MongoClients.create(clientSettings)) {

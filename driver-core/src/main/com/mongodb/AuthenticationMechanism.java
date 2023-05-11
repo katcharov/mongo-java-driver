@@ -40,7 +40,7 @@ public enum AuthenticationMechanism {
     /**
      * The MONGODB-OIDC mechanism.
      * @since 5.0
-     * @mongodb.server.release TODO
+     * @mongodb.server.release 7.0
      */
     MONGODB_OIDC("MONGODB-OIDC"),
 

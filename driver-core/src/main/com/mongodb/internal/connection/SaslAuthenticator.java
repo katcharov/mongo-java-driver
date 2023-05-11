@@ -56,6 +56,7 @@ abstract class SaslAuthenticator extends Authenticator implements SpeculativeAut
         super(credential, clusterConnectionMode, serverApi);
     }
 
+    @Override
     public void authenticate(final InternalConnection connection, final ConnectionDescription connectionDescription) {
         doAsSubject(() -> {
             SaslClient saslClient = createSaslClient(connection.getDescription().getServerAddress());
@@ -93,8 +94,10 @@ abstract class SaslAuthenticator extends Authenticator implements SpeculativeAut
     }
 
     @Override
-    void authenticateAsync(final InternalConnection connection, final ConnectionDescription connectionDescription,
-                           final SingleResultCallback<Void> callback) {
+    void authenticateAsync(
+            final InternalConnection connection,
+            final ConnectionDescription connectionDescription,
+            final SingleResultCallback<Void> callback) {
         try {
             doAsSubject(() -> {
                 SaslClient saslClient = createSaslClient(connection.getDescription().getServerAddress());
@@ -135,11 +138,13 @@ abstract class SaslAuthenticator extends Authenticator implements SpeculativeAut
         }
     }
 
-    private void getNextSaslResponseAsync(final SaslClient saslClient, final InternalConnection connection,
-                                          final SingleResultCallback<Void> callback) {
-        BsonDocument response = getSpeculativeAuthenticateResponse();
-        SingleResultCallback<Void> errHandlingCallback = errorHandlingCallback(callback, LOGGER);
+    private void getNextSaslResponseAsync(
+            final SaslClient saslClient,
+            final InternalConnection connection,
+            final SingleResultCallback<Void> callback) {
         try {
+            BsonDocument response = getSpeculativeAuthenticateResponse();
+            SingleResultCallback<Void> errHandlingCallback = errorHandlingCallback(callback, LOGGER);
             if (response == null) {
                 byte[] serverResponse = (saslClient.hasInitialResponse() ? saslClient.evaluateChallenge(new byte[0]) : null);
                 sendSaslStartAsync(serverResponse, connection, (result, t) -> {

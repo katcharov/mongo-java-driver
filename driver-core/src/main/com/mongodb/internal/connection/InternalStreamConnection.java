@@ -43,6 +43,7 @@ import com.mongodb.connection.Stream;
 import com.mongodb.connection.StreamFactory;
 import com.mongodb.event.CommandListener;
 import com.mongodb.internal.VisibleForTesting;
+import com.mongodb.internal.async.AsyncSupplier;
 import com.mongodb.internal.async.SingleResultCallback;
 import com.mongodb.internal.diagnostics.logging.Logger;
 import com.mongodb.internal.diagnostics.logging.Loggers;
@@ -71,6 +72,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static com.mongodb.assertions.Assertions.assertNotNull;
 import static com.mongodb.assertions.Assertions.isTrue;
 import static com.mongodb.assertions.Assertions.notNull;
+import static com.mongodb.internal.async.AsyncRunnable.runnable;
 import static com.mongodb.internal.async.ErrorHandlingResultCallback.errorHandlingCallback;
 import static com.mongodb.internal.connection.CommandHelper.HELLO;
 import static com.mongodb.internal.connection.CommandHelper.LEGACY_HELLO;
@@ -346,13 +348,17 @@ public class InternalStreamConnection implements InternalConnection {
 
     @Nullable
     @Override
-    public <T> T sendAndReceive(final CommandMessage message, final Decoder<T> decoder, final SessionContext sessionContext,
-                                final RequestContext requestContext, final OperationContext operationContext) {
+    public <T> T sendAndReceive(
+            final CommandMessage message,
+            final Decoder<T> decoder,
+            final SessionContext sessionContext,
+            final RequestContext requestContext,
+            final OperationContext operationContext) {
         try {
             return sendAndReceiveInternal(message, decoder, sessionContext, requestContext, operationContext);
         } catch (MongoCommandException e) {
             if (triggersReauthentication(e)) {
-                connectionInitializer.reauthenticate(this, this.description);
+                connectionInitializer.authenticate(this, this.description);
                 return sendAndReceiveInternal(message, decoder, sessionContext, requestContext, operationContext);
             }
             throw e;
@@ -492,25 +498,17 @@ public class InternalStreamConnection implements InternalConnection {
             final SingleResultCallback<T> callback) {
         notNull("stream is open", stream, callback);
 
-        SingleResultCallback<T> retryingCallback = (T r, Throwable t) -> {
-            if (triggersReauthentication(t)) {
-                connectionInitializer.reauthenticateAsync(this, this.description, (result1, t1) -> {
-                    if (t1 != null) {
-                        callback.onResult(null, t1);
-                    } else {
-                        sendAndReceiveAsyncInternal(
-                                message, decoder, sessionContext, requestContext, operationContext, callback);
-                    }
-                });
-                return;
-            }
-            callback.onResult(r, t);
-        };
-        sendAndReceiveAsyncInternal(
-                message, decoder, sessionContext, requestContext, operationContext, retryingCallback);
+        AsyncSupplier<T> sendAndReceiveAsyncInternal = c1 -> sendAndReceiveAsyncInternal(
+                message, decoder, sessionContext, requestContext, operationContext, c1);
+
+        sendAndReceiveAsyncInternal
+                .onErrorIf(e -> triggersReauthentication(e), runnable()
+                        .run(c -> connectionInitializer.authenticateAsync(this, this.description, c))
+                        .supply(sendAndReceiveAsyncInternal))
+                .invoke(callback);
     }
 
-    private boolean triggersReauthentication(@Nullable final Throwable t) {
+    public static boolean triggersReauthentication(@Nullable final Throwable t) {
         if (t instanceof MongoCommandException) {
             MongoCommandException e = (MongoCommandException) t;
             return e.getErrorCode() == 391; // TODO-OIDC extract constant

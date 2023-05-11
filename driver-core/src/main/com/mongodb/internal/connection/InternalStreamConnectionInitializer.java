@@ -16,6 +16,7 @@
 
 package com.mongodb.internal.connection;
 
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoCompressor;
 import com.mongodb.MongoCredential;
 import com.mongodb.MongoException;
@@ -83,19 +84,72 @@ public class InternalStreamConnectionInitializer implements InternalConnectionIn
         notNull("description", description);
 
         final ConnectionDescription connectionDescription = description.getConnectionDescription();
-        if (shouldAuthenticate(connectionDescription)) {
-            authenticator.authenticate(internalConnection, connectionDescription);
-        }
+
+        authenticate(internalConnection, connectionDescription);
+
         return completeConnectionDescriptionInitialization(internalConnection, description);
     }
 
     @Override
-    public void reauthenticate(
-            final InternalStreamConnection internalStreamConnection,
+    public void authenticate(
+            final InternalConnection internalStreamConnection,
             final ConnectionDescription connectionDescription) {
         if (shouldAuthenticate(connectionDescription)) {
-            authenticator.getMongoCredentialWithCache().clearCache();
-            authenticator.authenticate(internalStreamConnection, connectionDescription);
+            // AUTHLOCK
+
+            // TODO-OIDC move this
+            // all of below is done within authlock: check out the cache lock
+
+            String cachedAccessToken = null;
+            String invalidConnectionAccessToken = null;
+            String cachedRefreshToken = null;
+
+            if (cachedAccessToken != null) {
+                boolean cachedTokenIsInvalid = cachedAccessToken.equals(invalidConnectionAccessToken);
+                if (cachedTokenIsInvalid) {
+                    // cache.deleteAccessToken
+                    cachedAccessToken = null;
+                }
+            }
+
+            while (true) {
+                int refreshState;
+
+                if (cachedAccessToken != null) {
+                    refreshState = 1;
+                } else if (cachedRefreshToken != null) {
+                    refreshState = 2;
+                    // Invoke Refresh Callback using cached Refresh Token
+                    // Store the results in the cache.
+                } else { // cache is empty
+                    refreshState = 3;
+                    // Obtain IdpServerInfo from MongoDB server via “principal-request”
+                    // Cache result.
+                    // Invoke the Request Callback using cached IdpServerInfo
+                    // Store results in the cache
+                }
+
+                try {
+                    authenticator.authenticate(internalStreamConnection, connectionDescription);
+                    break;
+                } catch (MongoCommandException e) {
+                    if (InternalStreamConnection.triggersReauthentication(e)) {
+                        if (refreshState == 1) {
+                            // a cached access token failed
+                            // clear the cached access token
+                        } else if (refreshState == 2) {
+                            // a refresh token failed
+                            // clear the cached access and refresh tokens
+                        } else {
+                            // a clean-restart failed
+                            throw e;
+                        }
+                    }
+                }
+
+            }
+
+
         }
     }
 
@@ -135,13 +189,13 @@ public class InternalStreamConnectionInitializer implements InternalConnectionIn
     }
 
     @Override
-    public void reauthenticateAsync(
-            final InternalStreamConnection internalStreamConnection,
+    public void authenticateAsync(
+            final InternalConnection internalConnection,
             final ConnectionDescription connectionDescription,
             final SingleResultCallback<Void> callback) {
         if (shouldAuthenticate(connectionDescription)) {
             authenticator.getMongoCredentialWithCache().clearCache();
-            authenticator.authenticateAsync(internalStreamConnection, connectionDescription, callback);
+            authenticator.authenticateAsync(internalConnection, connectionDescription, callback);
         } else {
             callback.onResult(null, null);
         }

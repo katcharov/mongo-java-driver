@@ -908,7 +908,7 @@ public class ConnectionString {
                 break;
             case MONGODB_OIDC:
                 validateCreateOidcCredential(password);
-                credential = MongoCredential.createOidcCredentialInternal(userName);
+                credential = MongoCredential.createOidcCredential(userName);
                 break;
             default:
                 throw new UnsupportedOperationException(format("The connection string contains an invalid authentication mechanism'. "

@@ -32,12 +32,12 @@ interface InternalConnectionInitializer {
     void finishHandshakeAsync(InternalConnection internalConnection, InternalConnectionInitializationDescription description,
                               SingleResultCallback<InternalConnectionInitializationDescription> callback);
 
-    void reauthenticate(
-            InternalStreamConnection internalStreamConnection,
+    void authenticate(
+            InternalConnection internalConnection,
             ConnectionDescription connectionDescription);
 
-    void reauthenticateAsync(
-            InternalStreamConnection internalStreamConnection,
+    void authenticateAsync(
+            InternalConnection internalConnection,
             ConnectionDescription connectionDescription,
             SingleResultCallback<Void> callback);
 }
