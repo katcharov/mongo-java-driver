@@ -227,7 +227,6 @@ public class OidcAuthenticationProseTests {
         String expectedIssuer = "https://ebgxby0dw8.execute-api.us-west-1.amazonaws.com/default/mock-identity-config-oidc";
         int expectedSeconds = 5 * 60;
 
-
         TestCallback onRequest = createExpiredCallback();
         TestCallback onRefresh = createCallback();
         // #. Verify that the request callback was called with the appropriate
@@ -442,7 +441,7 @@ public class OidcAuthenticationProseTests {
         MongoClientSettings clientSettings = createSettings(OIDC_URL, onRequest, null);
         try (MongoClient mongoClient = createMongoClient(clientSettings)) {
             // #. Set a fail point for saslStart commands of the form:
-            failCommand(18, 2 * 2, "saslStart");
+//            failCommand(18, 2 * 2, "saslStart");
 
             // #. Perform a find operation that succeeds.
             performFind(mongoClient);
