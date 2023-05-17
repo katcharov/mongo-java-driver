@@ -23,6 +23,7 @@ import com.mongodb.MongoCompressor;
 import com.mongodb.MongoException;
 import com.mongodb.MongoInternalException;
 import com.mongodb.MongoInterruptedException;
+import com.mongodb.MongoSecurityException;
 import com.mongodb.MongoSocketClosedException;
 import com.mongodb.MongoSocketReadException;
 import com.mongodb.MongoSocketReadTimeoutException;
@@ -528,6 +529,17 @@ public class InternalStreamConnection implements InternalConnection {
         if (t instanceof MongoCommandException) {
             MongoCommandException e = (MongoCommandException) t;
             return e.getErrorCode() == 391; // TODO-OIDC extract constant
+        }
+        return false;
+    }
+    public static boolean triggersReauthentication2(@Nullable final Throwable t) {
+        if (t instanceof MongoSecurityException) {
+            MongoSecurityException e = (MongoSecurityException) t;
+            Throwable cause = e.getCause();
+            if (cause instanceof MongoCommandException) {
+                MongoCommandException cause2 = (MongoCommandException) cause;
+                return cause2.getErrorCode() == 18; // TODO-OIDC extract constant
+            }
         }
         return false;
     }

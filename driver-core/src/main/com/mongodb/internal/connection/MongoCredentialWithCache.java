@@ -68,7 +68,6 @@ public class MongoCredentialWithCache {
         cache.set(key, value);
     }
 
-    @Nullable
     public OidcCacheEntry getOidcCacheEntry() {
         System.out.println("FROM CACHE*: " + Thread.currentThread().getName() + "--" + cache.oidcCacheEntry);
         return cache.oidcCacheEntry;
@@ -99,8 +98,7 @@ public class MongoCredentialWithCache {
         private Object cacheKey;
         private Object cacheValue;
 
-        @Nullable
-        private volatile OidcCacheEntry oidcCacheEntry;
+        private volatile OidcCacheEntry oidcCacheEntry = new OidcCacheEntry();
 
         Object get(final Object key) {
             return Locks.withLock(lock, () -> {

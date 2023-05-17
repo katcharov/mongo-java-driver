@@ -9,11 +9,7 @@ public class TestListener {
     List<String> events = Collections.synchronizedList(new ArrayList<>());
 
     public void add(final String s) {
-        String message = new Date() + " -- " +
-                Thread.currentThread().getName() + " -- " +
-                s;
-        System.out.println(message);
-        events.add(message);
+        events.add(s);
     }
 
     public List<String> getEventStrings() {
