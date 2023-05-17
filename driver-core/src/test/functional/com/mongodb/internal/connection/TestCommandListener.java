@@ -18,11 +18,13 @@ package com.mongodb.internal.connection;
 
 import com.mongodb.MongoInterruptedException;
 import com.mongodb.MongoTimeoutException;
+import com.mongodb.client.TestListener;
 import com.mongodb.event.CommandEvent;
 import com.mongodb.event.CommandFailedEvent;
 import com.mongodb.event.CommandListener;
 import com.mongodb.event.CommandStartedEvent;
 import com.mongodb.event.CommandSucceededEvent;
+import com.mongodb.lang.Nullable;
 import org.bson.BsonDocument;
 import org.bson.BsonDocumentWriter;
 import org.bson.BsonDouble;
@@ -42,7 +44,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.stream.Collectors;
 
 import static com.mongodb.ClusterFixture.TIMEOUT;
 import static com.mongodb.internal.connection.InternalStreamConnection.getSecuritySensitiveCommands;
@@ -56,6 +57,8 @@ public class TestCommandListener implements CommandListener {
     private final List<String> eventTypes;
     private final List<String> ignoredCommandMonitoringEvents;
     private final List<CommandEvent> events = new ArrayList<>();
+    @Nullable
+    private volatile TestListener listener = null;
     private final Lock lock = new ReentrantLock();
     private final Condition commandCompletedCondition = lock.newCondition();
     private final boolean observeSensitiveCommands;
@@ -92,10 +95,15 @@ public class TestCommandListener implements CommandListener {
         this.observeSensitiveCommands = observeSensitiveCommands;
     }
 
+    public void setEventStrings(final TestListener eventStrings) {
+        this.listener = eventStrings;
+    }
+
     public void reset() {
         lock.lock();
         try {
             events.clear();
+            listener.add("CommandListener reset");
         } finally {
             lock.unlock();
         }
@@ -110,15 +118,16 @@ public class TestCommandListener implements CommandListener {
         }
     }
 
-    public List<String> getEventStrings() {
-        return this.getEvents().stream().map(c -> {
+    private void addEvent(final CommandEvent c) {
+        events.add(c);
+        if (listener != null) {
             String className = c.getClass().getSimpleName()
                     .replace("Command", "")
                     .replace("Event", "")
                     .toLowerCase();
             // example: "saslContinue succeeded"
-            return c.getCommandName() + " " + className;
-        }).collect(Collectors.toList());
+            listener.add(c.getCommandName() + " " + className);
+        }
     }
 
     public CommandStartedEvent getCommandStartedEvent(final String commandName) {
@@ -238,7 +247,7 @@ public class TestCommandListener implements CommandListener {
         }
         lock.lock();
         try {
-            events.add(new CommandStartedEvent(event.getRequestContext(), event.getOperationId(), event.getRequestId(),
+            addEvent(new CommandStartedEvent(event.getRequestContext(), event.getOperationId(), event.getRequestId(),
                     event.getConnectionDescription(), event.getDatabaseName(), event.getCommandName(),
                     event.getCommand() == null ? null : getWritableClone(event.getCommand())));
         } finally {
@@ -261,7 +270,7 @@ public class TestCommandListener implements CommandListener {
         }
         lock.lock();
         try {
-            events.add(new CommandSucceededEvent(event.getRequestContext(), event.getOperationId(), event.getRequestId(),
+            addEvent(new CommandSucceededEvent(event.getRequestContext(), event.getOperationId(), event.getRequestId(),
                     event.getConnectionDescription(), event.getCommandName(),
                     event.getResponse() == null ? null : event.getResponse().clone(),
                     event.getElapsedTime(TimeUnit.NANOSECONDS)));
@@ -286,7 +295,7 @@ public class TestCommandListener implements CommandListener {
         }
         lock.lock();
         try {
-            events.add(event);
+            addEvent(event);
             commandCompletedCondition.signal();
         } finally {
             lock.unlock();

@@ -19,6 +19,8 @@ package com.mongodb.internal.connection;
 import com.mongodb.connection.ConnectionDescription;
 import com.mongodb.internal.async.SingleResultCallback;
 
+import java.util.function.Supplier;
+
 interface InternalConnectionInitializer {
 
     InternalConnectionInitializationDescription startHandshake(InternalConnection internalConnection);
@@ -40,4 +42,9 @@ interface InternalConnectionInitializer {
             InternalConnection internalConnection,
             ConnectionDescription connectionDescription,
             SingleResultCallback<Void> callback);
+
+    <T> T attemptUnderAuthentication(
+            InternalConnection internalConnection,
+            ConnectionDescription connectionDescription,
+            Supplier<T> retryableOperation);
 }

@@ -16,6 +16,7 @@
 
 package com.mongodb.internal.connection;
 
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoCredential;
 import com.mongodb.MongoInternalException;
 import com.mongodb.ServerApi;
@@ -25,7 +26,10 @@ import com.mongodb.internal.async.SingleResultCallback;
 import com.mongodb.lang.NonNull;
 import com.mongodb.lang.Nullable;
 
+import java.util.function.Supplier;
+
 import static com.mongodb.assertions.Assertions.notNull;
+import static com.mongodb.internal.connection.InternalStreamConnection.triggersReauthentication;
 
 /**
  * <p>This class is not part of the public API and may be removed or changed at any time</p>
@@ -93,4 +97,20 @@ public abstract class Authenticator {
 
     abstract void authenticateAsync(InternalConnection connection, ConnectionDescription connectionDescription,
                                     SingleResultCallback<Void> callback);
+
+    public <T> T attemptUnderAuthentication(
+            final InternalConnection internalConnection,
+            final ConnectionDescription connectionDescription,
+            final Supplier<T> retryableOperation) {
+        // default implementation will retry
+        try {
+            return retryableOperation.get();
+        } catch (MongoCommandException e) {
+            if (triggersReauthentication(e)) {
+                authenticate(internalConnection, connectionDescription);
+                return retryableOperation.get();
+            }
+            throw e;
+        }
+    }
 }

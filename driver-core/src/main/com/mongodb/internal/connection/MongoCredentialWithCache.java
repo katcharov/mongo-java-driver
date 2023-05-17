@@ -21,8 +21,11 @@ import com.mongodb.MongoCredential;
 import com.mongodb.internal.Locks;
 import com.mongodb.lang.Nullable;
 
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
+
+import static com.mongodb.internal.connection.OidcAuthenticator.*;
 
 /**
  * <p>This class is not part of the public API and may be removed or changed at any time</p>
@@ -65,18 +68,39 @@ public class MongoCredentialWithCache {
         cache.set(key, value);
     }
 
+    @Nullable
+    public OidcCacheEntry getOidcCacheEntry() {
+        System.out.println("FROM CACHE*: " + Thread.currentThread().getName() + "--" + cache.oidcCacheEntry);
+        return cache.oidcCacheEntry;
+    }
+
+    public void setOidcCacheEntry(final OidcCacheEntry oidcCacheEntry) {
+        System.out.println("INTO CACHE*: "  + Thread.currentThread().getName() + "--" + oidcCacheEntry);
+        this.cache.oidcCacheEntry = oidcCacheEntry;
+    }
+
     public void clearCache() {
         cache.clear();
     }
 
     public <V> V withLock(final Supplier<V> k) {
-        return Locks.withLock(cache.lock, k);
+        try {
+
+            System.out.println("LOCKED "  + Thread.currentThread().getName() + "--" + cache.cacheKey);
+            return Locks.withLock(cache.lock, k);
+        } finally {
+
+            System.out.println("UNLOCKED "  + Thread.currentThread().getName() + "--" + cache.cacheKey);
+        }
     }
 
     static class SingleValueCache {
         private final ReentrantLock lock = new ReentrantLock();
         private Object cacheKey;
         private Object cacheValue;
+
+        @Nullable
+        private volatile OidcCacheEntry oidcCacheEntry;
 
         Object get(final Object key) {
             return Locks.withLock(lock, () -> {

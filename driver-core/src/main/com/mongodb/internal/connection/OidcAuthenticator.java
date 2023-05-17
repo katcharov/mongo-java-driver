@@ -18,6 +18,7 @@ package com.mongodb.internal.connection;
 
 import com.mongodb.AuthenticationMechanism;
 import com.mongodb.MongoClientException;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoConfigurationException;
 import com.mongodb.MongoCredential;
 import com.mongodb.MongoCredential.IdpServerInfo;
@@ -51,6 +52,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static com.mongodb.AuthenticationMechanism.MONGODB_OIDC;
@@ -62,6 +65,7 @@ import static com.mongodb.MongoCredential.REQUEST_TOKEN_CALLBACK;
 import static com.mongodb.MongoCredential.RefreshCallback;
 import static com.mongodb.MongoCredential.RequestCallback;
 import static com.mongodb.assertions.Assertions.notNull;
+import static com.mongodb.internal.connection.InternalStreamConnection.triggersReauthentication;
 import static java.lang.String.format;
 
 /**
@@ -71,8 +75,11 @@ public class OidcAuthenticator extends SaslAuthenticator {
     private static final int CALLBACK_TIMEOUT_SECONDS = (int) TimeUnit.MINUTES.toSeconds(5);
 
     public static final String AWS_WEB_IDENTITY_TOKEN_FILE = "AWS_WEB_IDENTITY_TOKEN_FILE";
+    
+    private volatile String connectionLastAccessToken = null;
 
-    private static final Object OIDC_CACHE_KEY = "OIDC";
+    private volatile int refreshState = 0;
+    private volatile ServerAddress serverAddress;
 
     public OidcAuthenticator(
             final MongoCredentialWithCache credential,
@@ -92,25 +99,203 @@ public class OidcAuthenticator extends SaslAuthenticator {
 
     @Override
     protected SaslClient createSaslClient(final ServerAddress serverAddress) {
-        MongoCredentialWithCache mongoCredentialWithCache = getMongoCredentialWithCache();
-        MongoCredential credential = mongoCredentialWithCache.getCredential();
-
-        // TODO-OIDC ensure these are of correct type?
-
-        RequestCallback requestCallback = credential.getMechanismProperty(REQUEST_TOKEN_CALLBACK, null);
-        Object mechanismProperty = credential.getMechanismProperty(REFRESH_TOKEN_CALLBACK, null);
-        RefreshCallback refreshCallback = (RefreshCallback) mechanismProperty;
+        this.serverAddress = serverAddress;
+        
+        RequestCallback requestCallback = getRequestCallback();
+//        RefreshCallback refreshCallback = getRefreshCallback();
         boolean automaticAuthentication = requestCallback == null;
 
+        MongoCredentialWithCache mongoCredentialWithCache = getMongoCredentialWithCache();
+        System.out.println("creating sasl client");
         return automaticAuthentication
                 ? new OidcAutomaticSaslClient(mongoCredentialWithCache)
-                : new OidcCallbackSaslClient(mongoCredentialWithCache, requestCallback, refreshCallback, serverAddress);
+                : new OidcCallbackSaslClient(mongoCredentialWithCache);
+    }
+
+    @Nullable
+    private RefreshCallback getRefreshCallback() {
+        // TODO-OIDC ensure these are of correct type?
+        return getMongoCredentialWithCache()
+                .getCredential()
+                .getMechanismProperty(REFRESH_TOKEN_CALLBACK, null);
+    }
+
+    @Nullable
+    private RequestCallback getRequestCallback() {
+        return getMongoCredentialWithCache()
+                .getCredential()
+                .getMechanismProperty(REQUEST_TOKEN_CALLBACK, null);
+    }
+
+    public Function<byte[], byte[]> evalFunc;
+
+    public void authenticate(
+            final InternalConnection connection,
+            final ConnectionDescription connectionDescription,
+            final Function<byte[], byte[]> evaluator) {
+        evalFunc = evaluator;
+        super.authenticate(connection, connectionDescription);
+    }
+
+
+    @Override
+    public <T> T attemptUnderAuthentication(
+            final InternalConnection internalConnection,
+            final ConnectionDescription connectionDescription,
+            final Supplier<T> retryableOperation) {
+
+        try {
+            return retryableOperation.get();
+        } catch (MongoCommandException e) {
+            if (triggersReauthentication(e)) {
+                authLock(internalConnection, connectionDescription);
+                return retryableOperation.get();
+            }
+            throw e;
+        }
+
+//        String cachedAccessToken = getValidCachedAccessToken();
+//        // We presume that the connection token is valid, if it exists
+//        boolean connectionTokenIsValid = lastAccessToken != null;
+//        if (connectionTokenIsValid) {
+//        } else if (cachedAccessToken != null) {
+//            // there is a cached access token that we can auth with
+//            // we do not need to do this under auth
+//
+//            // TODO-OIDC
+//            authenticate(internalConnection, connectionDescription);
+//            return retryableOperation.get();
+//        }
+
     }
 
 
     @Override
     public void authenticate(final InternalConnection connection, final ConnectionDescription connectionDescription) {
-        super.authenticate(connection, connectionDescription);
+
+        if (!connection.opened()) {
+            // initial handshake
+            String accessToken = getValidCachedAccessToken();
+            if (accessToken != null) {
+                connectionLastAccessToken = accessToken;
+                try {
+                    // TODO-OIDC If this is the handshake, send it under speculative auth. If the response lacks “speculativeAuthenticate”, then speculative authentication has failed: clear the connection’s Access Token and enter AUTHLOCK(Connection Access Token).
+                    authenticate(connection, connectionDescription, (bytes) -> sendJwt(accessToken));
+                } catch (MongoCommandException e) {
+                    if (InternalStreamConnection.triggersReauthentication(e)) {
+                        authLock(connection, connectionDescription);
+                    }
+                }
+            } else {
+                authLock(connection, connectionDescription);
+            }
+        } else {
+            // reauthentication
+            throw new RuntimeException("SHOULD HAVE CALLED OTHER METHOD");
+        }
+
+
+        //authLock(connection, connectionDescription);
+    }
+
+    private void authLock(final InternalConnection connection, final ConnectionDescription connectionDescription) {
+        MongoCredentialWithCache mongoCredentialWithCache = getMongoCredentialWithCache();
+
+        mongoCredentialWithCache.withLock(() -> {
+            refreshState = 0;
+            while (true) {
+                try {
+
+                    authenticate(connection, connectionDescription, (challenge) -> {
+
+                        OidcCacheEntry cached = mongoCredentialWithCache
+                                .getOidcCacheEntry();
+
+                        String cachedAccessToken = getValidCachedAccessToken();// cached == null ? null : cached.accessToken;
+                        String invalidConnectionAccessToken = connectionLastAccessToken;
+                        String cachedRefreshToken = cached == null ? null : cached.refreshToken;
+                        IdpServerInfo cachedIdpServerInfo = cached == null ? null : cached.idpServerInfo;
+
+                        if (cachedAccessToken != null) {
+                            boolean cachedTokenIsInvalid = cachedAccessToken.equals(invalidConnectionAccessToken);
+                            if (cachedTokenIsInvalid) {
+                                System.out.println("clearing invalid access token");
+                                mongoCredentialWithCache.setOidcCacheEntry(cached.clearAccessToken());
+                                cachedAccessToken = null;
+                            }
+                        }
+
+                        RefreshCallback refreshCallback = getRefreshCallback();
+
+                        if (cachedAccessToken != null) {
+                            System.out.println(">>> start 1, using cached JWT " + Thread.currentThread().getName() + "--");
+                            refreshState = 1;
+                            return sendJwt(cachedAccessToken);
+                        } else if (refreshCallback != null && cachedRefreshToken != null && cachedIdpServerInfo != null) {
+                            System.out.println(">>> start 2, calling onRefresh " + Thread.currentThread().getName() + "--");
+                            refreshState = 2;
+                            // Invoke Refresh Callback using cached Refresh Token
+                            IdPServerResponse result = refreshCallback.onRefresh(
+                                    getMongoCredential().getUserName(),
+                                    cachedIdpServerInfo,
+                                    cachedRefreshToken,
+                                    CALLBACK_TIMEOUT_SECONDS);
+                            // Store the results in the cache.
+                            return handleCallbackResult(cachedIdpServerInfo, result);
+//                            OidcCacheEntry newEntry = new OidcCacheEntry(cachedIdpServerInfo, result);
+//                            mongoCredentialWithCache.setOidcCacheEntry(newEntry);
+//                            return sendJwt(result.getAccessToken());
+                        } else { // cache is empty
+                            // Obtain IdpServerInfo from MongoDB server via “principal-request”
+                            // Cache result.
+                            // Invoke the Request Callback using cached IdpServerInfo
+                            // Store results in the cache
+                            if (refreshState != 3) {
+                                System.out.println(">>> start 3 " + Thread.currentThread().getName() + "--");
+                                refreshState = 3;
+                                return usernameToServer(mongoCredentialWithCache.getCredential().getUserName());
+                            } else {
+                                System.out.println(">>> start 4 - putting jwt into cache " + Thread.currentThread().getName() + "--");
+                                refreshState = 4;
+                                return tokensFromInitialCallbackToServer(challenge);
+                            }
+                        }
+
+                    });
+
+                    break;
+                } catch (MongoCommandException e) {
+
+
+                    OidcCacheEntry cached = mongoCredentialWithCache
+                            .getOidcCacheEntry();
+
+                    if (InternalStreamConnection.triggersReauthentication(e)) {
+                        if (refreshState == 1) {
+                            System.out.println(">>> retry 1");
+                            // a cached access token failed
+                            // clear the cached access token
+                            mongoCredentialWithCache.setOidcCacheEntry(cached
+                                    .clearAccessToken());
+                        } else if (refreshState == 2) {
+                            System.out.println(">>> retry 2");
+                            // a refresh token failed
+                            // clear the cached access and refresh tokens
+                            mongoCredentialWithCache.setOidcCacheEntry(cached
+                                    .clearAccessToken()
+                                    .clearRefreshToken());
+                        } else {
+                            System.out.println(">>> retry 3");
+                            // a clean-restart failed
+                            throw e;
+                        }
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+            return null;
+        });
     }
 
     @Override
@@ -122,7 +307,36 @@ public class OidcAuthenticator extends SaslAuthenticator {
     }
 
 
-    private static class OidcCacheEntry {
+    @Nullable
+    private String getValidCachedAccessToken() {
+        MongoCredentialWithCache mongoCredentialWithCache = getMongoCredentialWithCache();
+
+        OidcCacheEntry cached = mongoCredentialWithCache.getOidcCacheEntry();
+        String cachedAccessToken = cached == null ? null : cached.accessToken;
+        if (cachedAccessToken == null) {
+            System.out.println("cached access token was null");
+            return null;
+        }
+        if (cached.isExpired()) {
+            return mongoCredentialWithCache.withLock(() -> {
+                OidcCacheEntry recentCached = mongoCredentialWithCache.getOidcCacheEntry();
+                if (recentCached.isExpired()) {
+                    mongoCredentialWithCache.setOidcCacheEntry(
+                            recentCached.clearAccessToken());
+                    System.out.println("cached access token expired");
+                    return null;
+                } else {
+                    System.out.println("cached access token taken from cache: " + recentCached.accessToken);
+                    return recentCached.accessToken;
+                }
+            });
+        }
+
+        return cachedAccessToken;
+    }
+
+
+    public static class OidcCacheEntry {
         @Nullable
         private final String accessToken;
         @Nullable
@@ -132,22 +346,58 @@ public class OidcAuthenticator extends SaslAuthenticator {
         @Nullable
         private final IdpServerInfo idpServerInfo;
 
+        @Override
+        public String toString() {
+            return "OidcCacheEntry{" +
+                    "accessToken='" + accessToken + '\'' +
+                    ",\n expiry=" + expiry +
+                    ",\n refreshToken='" + refreshToken + '\'' +
+                    ",\n idpServerInfo=" + idpServerInfo + // TODO-OIDC \n
+                    '}';
+        }
+
         OidcCacheEntry(
                 @Nullable final IdpServerInfo idpServerInfo,
+                final IdPServerResponse tokens) {
+            this(
+                    tokens.getAccessToken(),
+                    tokens.getExpiresInSeconds() == null
+                            ? null
+                            : Instant.now().plusSeconds(tokens.getExpiresInSeconds())
+                            .minus(5, ChronoUnit.MINUTES),
+                    tokens.getRefreshToken(),
+                    idpServerInfo);
+        }
+
+        private OidcCacheEntry(
+                @Nullable final String accessToken,
                 @Nullable final Instant expiry,
-                final IdPServerResponse tokenResult) {
-            this.accessToken = tokenResult.getAccessToken();
-            this.idpServerInfo = idpServerInfo;
+                @Nullable final String refreshToken,
+                @Nullable final IdpServerInfo idpServerInfo) {
+            this.accessToken = accessToken;
             this.expiry = expiry;
-            this.refreshToken = tokenResult.getRefreshToken();
+            this.refreshToken = refreshToken;
+            this.idpServerInfo = idpServerInfo;
         }
 
         public boolean isExpired() {
             return expiry == null || Instant.now().isAfter(expiry);
         }
 
-        public final BsonDocument toBsonDocument() {
-            return new BsonDocument().append("jwt", new BsonString(accessToken));
+        public OidcCacheEntry clearAccessToken() {
+            return new OidcCacheEntry(
+                    null,
+                    null,
+                    this.refreshToken,
+                    this.idpServerInfo);
+        }
+
+        public OidcCacheEntry clearRefreshToken() {
+            return new OidcCacheEntry(
+                    this.accessToken,
+                    this.expiry,
+                    null,
+                    null);
         }
     }
 
@@ -160,14 +410,6 @@ public class OidcAuthenticator extends SaslAuthenticator {
             this.credentialWithCache = mongoCredentialWithCache;
         }
 
-        protected byte[] toBson(final BsonDocument document) {
-            byte[] bytes;
-            BasicOutputBuffer buffer = new BasicOutputBuffer();
-            new BsonDocumentCodec().encode(new BsonBinaryWriter(buffer), document, EncoderContext.builder().build());
-            bytes = new byte[buffer.size()];
-            System.arraycopy(buffer.getInternalBuffer(), 0, bytes, 0, buffer.getSize());
-            return bytes;
-        }
 
         @Override
         public final byte[] evaluateChallenge(final byte[] challenge) {
@@ -224,162 +466,146 @@ public class OidcAuthenticator extends SaslAuthenticator {
         }
     }
 
-    private static class OidcCallbackSaslClient extends OidcSaslClient {
-        private final RequestCallback requestCallback;
-        private final RefreshCallback refreshCallback;
-        private final ServerAddress serverAddress;
+    private class OidcCallbackSaslClient extends OidcSaslClient {
 
-        OidcCallbackSaslClient(
-                final MongoCredentialWithCache mongoCredentialWithCache,
-                final RequestCallback requestCallback,
-                @Nullable final RefreshCallback refreshCallback,
-                final ServerAddress serverAddress) {
+        OidcCallbackSaslClient(final MongoCredentialWithCache mongoCredentialWithCache) {
             super(mongoCredentialWithCache);
-            this.requestCallback = requestCallback;
-            this.refreshCallback = refreshCallback;
-            this.serverAddress = serverAddress;
         }
 
         @Override
         public boolean isComplete() {
-            return getStep() >= 2;
+            return refreshState != 3;
         }
 
         @Override
         public byte[] evaluateChallengeInternal(final byte[] challenge) {
-            return getCredentialWithCache().withLock(() -> evaluate(challenge));
+            return evalFunc.apply(challenge);
         }
+    }
 
-        private byte[] evaluate(final byte[] challenge) {
-            OidcCacheEntry cached = getCredentialWithCache().getFromCache(OIDC_CACHE_KEY, OidcCacheEntry.class);
 
-            if (cached != null) {
-                if (!cached.isExpired()) {
-                    return toBson(cached.toBsonDocument());
-                }
-                return refreshableTokensFromCacheToServer(cached);
-            }
+    //        private byte[] refreshableTokensFromCacheToServer(final OidcCacheEntry cached) {
+//            IdPServerResponse result;
+//            if (refreshCallback == null) {
+//                result = invokeRequestCallback(cached.idpServerInfo);
+//            } else {
+//                result = refreshCallback.onRefresh(
+//                        getCredential().getUserName(),
+//                        cached.idpServerInfo,
+//                        cached.refreshToken,
+//                        CALLBACK_TIMEOUT_SECONDS);
+//            }
+//            return handleCallbackResult(cached.idpServerInfo, result);
+//        }
+    private byte[] usernameToServer(@Nullable final String username) {
+        BsonDocument document = new BsonDocument();
+        if (username != null) {
+            document = document.append("n", new BsonString(username));
+        }
+        return toBson(document);
+    }
+    private byte[] handleCallbackResult(
+            final IdpServerInfo serverInfo,
+            @Nullable final IdPServerResponse tokens) {
+        if (tokens == null) {
+            throw new MongoConfigurationException("Result of callback must not be null");
+        }
+        OidcCacheEntry newEntry = new OidcCacheEntry(serverInfo, tokens);
+        getMongoCredentialWithCache().setOidcCacheEntry(newEntry);
+        return sendJwt(tokens.getAccessToken());
+    }
 
-            if (getStep() == 1) {
-                return usernameToServer(getCredential().getUserName());
-            } else if (getStep() == 2) {
-                return tokensFromInitialCallbackToServer(challenge);
+    private byte[] tokensFromInitialCallbackToServer(final byte[] challenge) {
+        IdpServerInfo serverInfo = getIdpServerInfo(challenge);
+
+        IdPServerResponse result = invokeRequestCallback(serverInfo);
+
+        return handleCallbackResult(serverInfo, result);
+    }
+
+    @NotNull
+    private IdpServerInfo getIdpServerInfo(final byte[] challenge) {
+        BsonDocument c = new RawBsonDocument(challenge);
+
+        String issuer = getString(c, "issuer");
+        String clientId = getString(c, "clientId");
+        notNull("issuer", issuer);
+        notNull("clientId", clientId);
+
+        IdpServerInfo serverInfo = new IdpServerInfo(
+                issuer,
+                clientId,
+                getStringArray(c, "requestScopes"));
+        return serverInfo;
+    }
+
+    private IdPServerResponse invokeRequestCallback(final IdpServerInfo serverInfo) {
+        MongoCredential credential = getMongoCredential();
+        validateAllowedHosts(credential);
+        return getRequestCallback().onRequest(
+                credential.getUserName(),
+                serverInfo,
+                CALLBACK_TIMEOUT_SECONDS);
+    }
+
+    private void validateAllowedHosts(final MongoCredential credential) {
+        List<String> allowedHosts = credential.getMechanismProperty(ALLOWED_HOSTS, DEFAULT_ALLOWED_HOSTS);
+        notNull(ALLOWED_HOSTS, allowedHosts);
+        String host = serverAddress.getHost();
+        boolean permitted = allowedHosts.stream().anyMatch(allowedHost -> {
+            if (allowedHost.startsWith("*.")) {
+                String ending = allowedHost.substring(1);
+                return host.endsWith(ending);
+            } else if (allowedHost.contains("*")) {
+                throw new IllegalArgumentException(
+                        "Allowed host " + allowedHost + " contains invalid wildcard");
             } else {
-                throw new MongoClientException(
-                        format("Too many steps involved in the %s negotiation.", getMechanismName()));
+                return host.equals(allowedHost);
             }
+        });
+        if (!permitted) {
+            throw new MongoSecurityException(
+                    credential, "Host not permitted by " + ALLOWED_HOSTS + ": " + host);
         }
+    }
 
-        private byte[] usernameToServer(@Nullable final String username) {
-            BsonDocument document = new BsonDocument();
-            if (username != null) {
-                document = document.append("n", new BsonString(username));
-            }
-            return toBson(document);
+    @Nullable
+    private String getString(final BsonDocument document, final String key) {
+        if (!document.containsKey(key) || !document.isString(key)) {
+            return null;
         }
+        return document.getString(key).getValue();
+    }
 
-        private byte[] tokensFromInitialCallbackToServer(final byte[] challenge) {
-            BsonDocument c = new RawBsonDocument(challenge);
-
-            String issuer = getString(c, "issuer");
-            String clientId = getString(c, "clientId");
-            notNull("issuer", issuer);
-            notNull("clientId", clientId);
-
-            IdpServerInfo serverInfo = new IdpServerInfo(
-                    issuer,
-                    clientId,
-                    getStringArray(c, "requestScopes"));
-
-            IdPServerResponse result = invokeRequestCallback(serverInfo);
-
-            return handleResult(serverInfo, result);
+    @Nullable
+    private List<String> getStringArray(final BsonDocument document, final String key) {
+        if (!document.containsKey(key) || document.isArray(key)) {
+            return null;
         }
+        List<String> result = document.getArray(key).getValues().stream()
+                // ignore non-string values from server, rather than error
+                .filter(v -> v.isString())
+                .map(v -> v.asString().getValue())
+                .collect(Collectors.toList());
+        return Collections.unmodifiableList(result);
+    }
 
-        @NotNull
-        private IdPServerResponse invokeRequestCallback(final IdpServerInfo serverInfo) {
-            MongoCredential credential = getCredential();
-            validateAllowedHosts(credential);
-            return requestCallback.onRequest(
-                    credential.getUserName(),
-                    serverInfo,
-                    CALLBACK_TIMEOUT_SECONDS);
-        }
 
-        private void validateAllowedHosts(final MongoCredential credential) {
-            List<String> allowedHosts = credential.getMechanismProperty(ALLOWED_HOSTS, DEFAULT_ALLOWED_HOSTS);
-            notNull(ALLOWED_HOSTS, allowedHosts);
-            String host = serverAddress.getHost();
-            boolean permitted = allowedHosts.stream().anyMatch(allowedHost -> {
-                if (allowedHost.startsWith("*.")) {
-                    String ending = allowedHost.substring(1);
-                    return host.endsWith(ending);
-                } else if (allowedHost.contains("*")) {
-                    throw new IllegalArgumentException(
-                            "Allowed host " + allowedHost + " contains invalid wildcard");
-                } else {
-                    return host.equals(allowedHost);
-                }
-            });
-            if (!permitted) {
-                throw new MongoSecurityException(
-                        credential, "Host not permitted by " + ALLOWED_HOSTS + ": " + host);
-            }
-        }
+    @NotNull
+    private byte[] sendJwt(final String accessToken) {
+        System.out.println("SENDING JWT " + Thread.currentThread().getName() + "--");
+        OidcAuthenticator.this.connectionLastAccessToken = accessToken;
 
-        @Nullable
-        private static String getString(final BsonDocument document, final String key) {
-            if (!document.containsKey(key) || !document.isString(key)) {
-                return null;
-            }
-            return document.getString(key).getValue();
-        }
+        return toBson(new BsonDocument().append("jwt", new BsonString(accessToken)));
+    }
 
-        @Nullable
-        private static List<String> getStringArray(final BsonDocument document, final String key) {
-            if (!document.containsKey(key) || document.isArray(key)) {
-                return null;
-            }
-            List<String> result = document.getArray(key).getValues().stream()
-                    // ignore non-string values from server, rather than error
-                    .filter(v -> v.isString())
-                    .map(v -> v.asString().getValue())
-                    .collect(Collectors.toList());
-            return Collections.unmodifiableList(result);
-        }
-
-        private byte[] refreshableTokensFromCacheToServer(final OidcCacheEntry cached) {
-            IdPServerResponse result;
-            if (refreshCallback == null) {
-                result = invokeRequestCallback(cached.idpServerInfo);
-            } else {
-                result = refreshCallback.onRefresh(
-                        getCredential().getUserName(),
-                        cached.idpServerInfo,
-                        cached.refreshToken,
-                        CALLBACK_TIMEOUT_SECONDS);
-            }
-            return handleResult(cached.idpServerInfo, result);
-        }
-
-        private byte[] handleResult(
-                final IdpServerInfo serverInfo,
-                @Nullable final IdPServerResponse tokens) {
-            if (tokens == null) {
-                throw new MongoConfigurationException("Result of callback must not be null");
-            }
-            Integer expiresInSeconds = tokens.getExpiresInSeconds();
-            Instant expiry = expiresInSeconds == null
-                    ? null
-                    : Instant.now()
-                    .plusSeconds(expiresInSeconds)
-                    .minus(5, ChronoUnit.MINUTES);
-
-            OidcCacheEntry entry = new OidcCacheEntry(serverInfo, expiry, tokens);
-            getCredentialWithCache().putInCache(OIDC_CACHE_KEY, entry);
-
-            return toBson(new BsonDocument().append("jwt", new BsonString(entry.accessToken)));
-        }
+    protected static byte[] toBson(final BsonDocument document) {
+        byte[] bytes;
+        BasicOutputBuffer buffer = new BasicOutputBuffer();
+        new BsonDocumentCodec().encode(new BsonBinaryWriter(buffer), document, EncoderContext.builder().build());
+        bytes = new byte[buffer.size()];
+        System.arraycopy(buffer.getInternalBuffer(), 0, bytes, 0, buffer.getSize());
+        return bytes;
     }
 
     public static final class OidcValidator {

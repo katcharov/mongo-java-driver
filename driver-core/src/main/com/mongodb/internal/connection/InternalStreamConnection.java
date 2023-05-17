@@ -96,6 +96,9 @@ import static java.util.Arrays.asList;
  */
 @NotThreadSafe
 public class InternalStreamConnection implements InternalConnection {
+    // otherwise, would not exist
+    @VisibleForTesting(otherwise = VisibleForTesting.AccessModifier.PRIVATE)
+    public static volatile boolean RECORD_EVERYTHING = false;
 
     private static final Set<String> SECURITY_SENSITIVE_COMMANDS = new HashSet<>(asList(
             "authenticate",
@@ -354,15 +357,28 @@ public class InternalStreamConnection implements InternalConnection {
             final SessionContext sessionContext,
             final RequestContext requestContext,
             final OperationContext operationContext) {
-        try {
-            return sendAndReceiveInternal(message, decoder, sessionContext, requestContext, operationContext);
-        } catch (MongoCommandException e) {
-            if (triggersReauthentication(e)) {
-                connectionInitializer.authenticate(this, this.description);
-                return sendAndReceiveInternal(message, decoder, sessionContext, requestContext, operationContext);
-            }
-            throw e;
-        }
+//        if (!shouldAuthenticate(connectionDescription)) {
+//            return retryableOperation.get();
+//        }
+
+        return connectionInitializer.attemptUnderAuthentication(
+                this,
+                this.description,
+                () -> sendAndReceiveInternal(message, decoder, sessionContext, requestContext, operationContext)
+        );
+
+//        try {
+////            if (message.containsPayload()) {
+////                connectionInitializer.authenticate(this, this.description);
+////            }
+//            return sendAndReceiveInternal(message, decoder, sessionContext, requestContext, operationContext);
+//        } catch (MongoCommandException e) {
+//            if (triggersReauthentication(e)) {
+//                connectionInitializer.authenticate(this, this.description);
+//                return sendAndReceiveInternal(message, decoder, sessionContext, requestContext, operationContext);
+//            }
+//            throw e;
+//        }
     }
 
     @Nullable
@@ -910,14 +926,19 @@ public class InternalStreamConnection implements InternalConnection {
 
     private static final StructuredLogger COMMAND_PROTOCOL_LOGGER = new StructuredLogger("protocol.command");
 
-    private CommandEventSender createCommandEventSender(final CommandMessage message, final ByteBufferBsonOutput bsonOutput,
-            final RequestContext requestContext, final OperationContext operationContext) {
-        if (!isMonitoringConnection && opened() && (commandListener != null || COMMAND_PROTOCOL_LOGGER.isRequired(DEBUG, getClusterId()))) {
-            return new LoggingCommandEventSender(SECURITY_SENSITIVE_COMMANDS, SECURITY_SENSITIVE_HELLO_COMMANDS, description,
-                    commandListener, requestContext, operationContext, message, bsonOutput, COMMAND_PROTOCOL_LOGGER, loggerSettings);
-        } else {
+    private CommandEventSender createCommandEventSender(
+            final CommandMessage message,
+            final ByteBufferBsonOutput bsonOutput,
+            final RequestContext requestContext,
+            final OperationContext operationContext) {
+        boolean listensOrLogs = commandListener != null || COMMAND_PROTOCOL_LOGGER.isRequired(DEBUG, getClusterId());
+        if (!RECORD_EVERYTHING && (isMonitoringConnection || !opened() || !listensOrLogs)) {
             return new NoOpCommandEventSender();
         }
+        return new LoggingCommandEventSender(
+                SECURITY_SENSITIVE_COMMANDS, SECURITY_SENSITIVE_HELLO_COMMANDS, description, commandListener,
+                requestContext, operationContext, message, bsonOutput,
+                COMMAND_PROTOCOL_LOGGER, loggerSettings);
     }
 
     private ClusterId getClusterId() {
