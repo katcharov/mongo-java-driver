@@ -34,10 +34,6 @@ interface InternalConnectionInitializer {
     void finishHandshakeAsync(InternalConnection internalConnection, InternalConnectionInitializationDescription description,
                               SingleResultCallback<InternalConnectionInitializationDescription> callback);
 
-    void authenticate(
-            InternalConnection internalConnection,
-            ConnectionDescription connectionDescription);
-
     void authenticateAsync(
             InternalConnection internalConnection,
             ConnectionDescription connectionDescription,

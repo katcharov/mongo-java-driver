@@ -78,8 +78,12 @@ public class OidcAuthenticator extends SaslAuthenticator {
     
     private volatile String connectionLastAccessToken = null;
 
-    private volatile int refreshState = 0;
-    private volatile ServerAddress serverAddress;
+    private int refreshState = 0;
+    private ServerAddress serverAddress;
+
+    private BsonDocument speculativeAuthenticateResponse;
+
+    public Function<byte[], byte[]> evaluateChallengeFunction;
 
     public OidcAuthenticator(
             final MongoCredentialWithCache credential,
@@ -110,6 +114,48 @@ public class OidcAuthenticator extends SaslAuthenticator {
     }
 
     @Nullable
+    public BsonDocument createSpeculativeAuthenticateCommand(final InternalConnection connection) {
+        if (connection.opened()) { // TODO-OIDC
+            return null;
+        }
+
+
+
+        try {
+//            byte[] outToken = evaluateChallengeFunction.apply(new byte[0]);
+
+            byte[] outToken = evaluate(new byte[0]);
+
+//            String accessToken = getValidCachedAccessToken();
+//            if (accessToken != null) {
+//                outToken = sendJwt(accessToken);
+//            } else {
+//                authLock(connection, connection.getDescription());
+//            }
+
+
+            BsonDocument startDocument = createSaslStartCommandDocument(outToken)
+                    .append("db", new BsonString(getMongoCredential().getSource()));
+            appendSaslStartOptions(startDocument);
+            return startDocument;
+        } catch (Exception e) {
+            throw wrapException(e);
+        }
+    }
+
+    @Nullable
+    public BsonDocument getSpeculativeAuthenticateResponse() {
+        // response should only be read once
+        BsonDocument response = speculativeAuthenticateResponse;
+        this.speculativeAuthenticateResponse = null;
+        return response;
+    }
+
+    public void setSpeculativeAuthenticateResponse(@Nullable final BsonDocument response) {
+        speculativeAuthenticateResponse = response;
+    }
+
+    @Nullable
     private RefreshCallback getRefreshCallback() {
         // TODO-OIDC ensure these are of correct type?
         return getMongoCredentialWithCache()
@@ -124,15 +170,6 @@ public class OidcAuthenticator extends SaslAuthenticator {
                 .getMechanismProperty(REQUEST_TOKEN_CALLBACK, null);
     }
 
-    public Function<byte[], byte[]> evalFunc;
-
-    public void authenticate(
-            final InternalConnection connection,
-            final ConnectionDescription connectionDescription,
-            final Function<byte[], byte[]> evaluator) {
-        evalFunc = evaluator;
-        super.authenticate(connection, connectionDescription);
-    }
 
 
     @Override
@@ -140,11 +177,11 @@ public class OidcAuthenticator extends SaslAuthenticator {
             final InternalConnection internalConnection,
             final ConnectionDescription connectionDescription,
             final Supplier<T> retryableOperation) {
-
         try {
             return retryableOperation.get();
         } catch (MongoCommandException e) {
             if (triggersReauthentication(e)) {
+                refreshState = 0;
                 authLock(internalConnection, connectionDescription);
                 return retryableOperation.get();
             }
@@ -152,119 +189,48 @@ public class OidcAuthenticator extends SaslAuthenticator {
         }
     }
 
-
     @Override
     public void authenticate(final InternalConnection connection, final ConnectionDescription connectionDescription) {
 
-        if (!connection.opened()) {
-            // initial handshake
-            String accessToken = getValidCachedAccessToken();
-            if (accessToken != null) {
-                connectionLastAccessToken = accessToken;
-                try {
-                    // TODO-OIDC If this is the handshake, send it under speculative auth. If the response lacks “speculativeAuthenticate”, then speculative authentication has failed: clear the connection’s Access Token and enter AUTHLOCK(Connection Access Token).
-                    authenticate(connection, connectionDescription, (bytes) -> sendJwt(accessToken));
-                } catch (MongoCommandException e) {
-                    if (InternalStreamConnection.triggersReauthentication2(e)) {
-                        authLock(connection, connectionDescription);
-                    }
+        if (connection.opened()) {
+            // method must only be called during original handshake; fail otherwise
+            throw new UnsupportedOperationException();
+        }
+        // this method "wraps" the default authentication method in custom OIDC retry logic
+        String accessToken = getValidCachedAccessToken();
+        if (accessToken != null) {
+            try {
+                // TODO-OIDC If this is the handshake, send it under speculative auth. If the response lacks “speculativeAuthenticate”, then speculative authentication has failed: clear the connection’s Access Token and enter AUTHLOCK(Connection Access Token).
+                authenticateUsing(connection, connectionDescription, (bytes) -> sendJwt(accessToken));
+            } catch (MongoCommandException e) {
+                if (InternalStreamConnection.triggersRetry(e)) {
+                    authLock(connection, connectionDescription);
                 }
-            } else {
-                authLock(connection, connectionDescription);
             }
         } else {
-            // reauthentication
-            throw new RuntimeException("SHOULD HAVE CALLED OTHER METHOD");
+            authLock(connection, connectionDescription);
         }
+    }
 
-
-        //authLock(connection, connectionDescription);
+    private void authenticateUsing(
+            final InternalConnection connection,
+            final ConnectionDescription connectionDescription,
+            final Function<byte[], byte[]> evaluateChallengeFunction) {
+        this.evaluateChallengeFunction = evaluateChallengeFunction;
+        super.authenticate(connection, connectionDescription);
     }
 
     private void authLock(final InternalConnection connection, final ConnectionDescription connectionDescription) {
         MongoCredentialWithCache mongoCredentialWithCache = getMongoCredentialWithCache();
-
         mongoCredentialWithCache.withLock(() -> {
-            refreshState = 0;
             while (true) {
                 try {
-                    authenticate(connection, connectionDescription, (challenge) -> {
-
-                        OidcCacheEntry cached = mongoCredentialWithCache.getOidcCacheEntry();
-                        String cachedAccessToken = getValidCachedAccessToken();
-                        String invalidConnectionAccessToken = connectionLastAccessToken;
-                        String cachedRefreshToken = cached.refreshToken;
-                        IdpServerInfo cachedIdpServerInfo = cached.idpServerInfo;
-
-                        if (cachedAccessToken != null) {
-                            boolean cachedTokenIsInvalid = cachedAccessToken.equals(invalidConnectionAccessToken);
-                            if (cachedTokenIsInvalid) {
-                                System.out.println("clearing invalid access token");
-                                mongoCredentialWithCache.setOidcCacheEntry(cached.clearAccessToken());
-                                cachedAccessToken = null;
-                            }
-                        }
-
-                        RefreshCallback refreshCallback = getRefreshCallback();
-
-                        if (cachedAccessToken != null) {
-                            System.out.println(">>> start 1, using cached JWT " + Thread.currentThread().getName() + "--");
-                            refreshState = 1;
-                            return sendJwt(cachedAccessToken);
-                        } else if (refreshCallback != null && cachedRefreshToken != null && cachedIdpServerInfo != null) {
-                            System.out.println(">>> start 2, calling onRefresh " + Thread.currentThread().getName() + "--");
-                            refreshState = 2;
-                            // Invoke Refresh Callback using cached Refresh Token
-                            IdPServerResponse result = refreshCallback.onRefresh(
-                                    getMongoCredential().getUserName(),
-                                    cachedIdpServerInfo,
-                                    cachedRefreshToken,
-                                    CALLBACK_TIMEOUT_SECONDS);
-                            // Store the results in the cache.
-                            return handleCallbackResult(cachedIdpServerInfo, result);
-                        } else { // cache is empty
-                            // Obtain IdpServerInfo from MongoDB server via “principal-request”
-                            // Cache result.
-                            // Invoke the Request Callback using cached IdpServerInfo
-                            // Store results in the cache
-                            if (refreshState != 3) {
-                                System.out.println(">>> start 3 " + Thread.currentThread().getName() + "--");
-                                refreshState = 3;
-                                return usernameToServer(mongoCredentialWithCache.getCredential().getUserName());
-                            } else {
-                                System.out.println(">>> start 4 - putting jwt into cache " + Thread.currentThread().getName() + "--");
-                                refreshState = 4;
-                                return tokensFromInitialCallbackToServer(challenge);
-                            }
-                        }
-
-                    });
-
+                    authenticateUsing(connection, connectionDescription, (challenge) -> evaluate(challenge));
                     break;
                 } catch (MongoCommandException | MongoSecurityException e) {
-
-
-                    OidcCacheEntry cached = mongoCredentialWithCache.getOidcCacheEntry();
-
-                    if (InternalStreamConnection.triggersReauthentication2(e)) {
-                        if (refreshState == 1) {
-                            System.out.println(">>> retry 1");
-                            // a cached access token failed
-                            // clear the cached access token
-                            mongoCredentialWithCache.setOidcCacheEntry(cached
-                                    .clearAccessToken());
-                        } else if (refreshState == 2) {
-                            System.out.println(">>> retry 2");
-                            // a refresh token failed
-                            // clear the cached access and refresh tokens
-                            mongoCredentialWithCache.setOidcCacheEntry(cached
-                                    .clearAccessToken()
-                                    .clearRefreshToken());
-                        } else {
-                            System.out.println(">>> retry 3&4 - failed");
-                            // a clean-restart failed
-                            throw e;
-                        }
+                    OidcCacheEntry cacheEntry = mongoCredentialWithCache.getOidcCacheEntry();
+                    if (InternalStreamConnection.triggersRetry(e)) {
+                        prepareRetry(e, cacheEntry);
                     } else {
                         throw e;
                     }
@@ -274,6 +240,81 @@ public class OidcAuthenticator extends SaslAuthenticator {
         });
     }
 
+    private byte[] evaluate(final byte[] challenge) {
+        MongoCredentialWithCache mongoCredentialWithCache = getMongoCredentialWithCache();
+        OidcCacheEntry cacheEntry = mongoCredentialWithCache.getOidcCacheEntry();
+        String cachedAccessToken = getValidCachedAccessToken();
+        String invalidConnectionAccessToken = connectionLastAccessToken;
+        String cachedRefreshToken = cacheEntry.refreshToken;
+        IdpServerInfo cachedIdpServerInfo = cacheEntry.idpServerInfo;
+
+        if (cachedAccessToken != null) {
+            boolean cachedTokenIsInvalid = cachedAccessToken.equals(invalidConnectionAccessToken);
+            if (cachedTokenIsInvalid) {
+                System.out.println("clearing invalid access token");
+                mongoCredentialWithCache.setOidcCacheEntry(cacheEntry.clearAccessToken());
+                cachedAccessToken = null;
+            }
+        }
+        RefreshCallback refreshCallback = getRefreshCallback();
+        if (cachedAccessToken != null) {
+            System.out.println(">>> start 1, using cached JWT " + Thread.currentThread().getName() + "--");
+            refreshState = 1;
+            return sendJwt(cachedAccessToken);
+        } else if (refreshCallback != null && cachedRefreshToken != null && cachedIdpServerInfo != null) {
+            System.out.println(">>> start 2, calling onRefresh " + Thread.currentThread().getName() + "--");
+            refreshState = 2;
+            // Invoke Refresh Callback using cached Refresh Token
+            IdPServerResponse result = refreshCallback.onRefresh(
+                    getMongoCredential().getUserName(),
+                    cachedIdpServerInfo,
+                    cachedRefreshToken,
+                    CALLBACK_TIMEOUT_SECONDS);
+            // Store the results in the cache.
+            return handleCallbackResult(cachedIdpServerInfo, result);
+        } else {
+            if (challenge.length == 0) {
+                // occurs when speculative fails
+                refreshState = 0;
+            }
+            // cache is empty
+            if (refreshState != 3) {
+                System.out.println(">>> start 3 " + Thread.currentThread().getName() + "--");
+                refreshState = 3;
+                return usernameToServer(mongoCredentialWithCache.getCredential().getUserName());
+            } else {
+                System.out.println(">>> start 4 - putting jwt into cache " + Thread.currentThread().getName() + "--");
+                refreshState = 4;
+
+                IdpServerInfo serverInfo = getIdpServerInfo(challenge);
+                IdPServerResponse result = invokeRequestCallback(serverInfo);
+                return handleCallbackResult(serverInfo, result);
+            }
+        }
+    }
+
+    private void prepareRetry(final MongoException e, final OidcCacheEntry cacheEntry) {
+        MongoCredentialWithCache mongoCredentialWithCache = getMongoCredentialWithCache();
+        if (refreshState == 1) {
+            System.out.println(">>> retry 1");
+            // a cached access token failed
+            // clear the cached access token
+            mongoCredentialWithCache.setOidcCacheEntry(cacheEntry
+                    .clearAccessToken());
+        } else if (refreshState == 2) {
+            System.out.println(">>> retry 2");
+            // a refresh token failed
+            // clear the cached access and refresh tokens
+            mongoCredentialWithCache.setOidcCacheEntry(cacheEntry
+                    .clearAccessToken()
+                    .clearRefreshToken());
+        } else {
+            System.out.println(">>> retry 3&4 - failed");
+            // a clean-restart failed
+            throw e;
+        }
+    }
+
     @Override
     void authenticateAsync(
             final InternalConnection connection,
@@ -281,7 +322,6 @@ public class OidcAuthenticator extends SaslAuthenticator {
             final SingleResultCallback<Void> callback) {
         super.authenticateAsync(connection, connectionDescription, callback);
     }
-
 
     @Nullable
     private String getValidCachedAccessToken() {
@@ -452,7 +492,7 @@ public class OidcAuthenticator extends SaslAuthenticator {
 
         @Override
         public byte[] evaluateChallengeInternal(final byte[] challenge) {
-            return evalFunc.apply(challenge);
+            return evaluateChallengeFunction.apply(challenge);
         }
     }
 
@@ -486,14 +526,6 @@ public class OidcAuthenticator extends SaslAuthenticator {
         OidcCacheEntry newEntry = new OidcCacheEntry(serverInfo, tokens);
         getMongoCredentialWithCache().setOidcCacheEntry(newEntry);
         return sendJwt(tokens.getAccessToken());
-    }
-
-    private byte[] tokensFromInitialCallbackToServer(final byte[] challenge) {
-        IdpServerInfo serverInfo = getIdpServerInfo(challenge);
-
-        IdPServerResponse result = invokeRequestCallback(serverInfo);
-
-        return handleCallbackResult(serverInfo, result);
     }
 
     @NotNull
@@ -567,8 +599,7 @@ public class OidcAuthenticator extends SaslAuthenticator {
     @NotNull
     private byte[] sendJwt(final String accessToken) {
         System.out.println("SENDING JWT " + Thread.currentThread().getName() + "--");
-        OidcAuthenticator.this.connectionLastAccessToken = accessToken;
-
+        connectionLastAccessToken = accessToken;
         return toBson(new BsonDocument().append("jwt", new BsonString(accessToken)));
     }
 

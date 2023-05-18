@@ -82,31 +82,11 @@ public class InternalStreamConnectionInitializer implements InternalConnectionIn
                                                                        final InternalConnectionInitializationDescription description) {
         notNull("internalConnection", internalConnection);
         notNull("description", description);
-
         final ConnectionDescription connectionDescription = description.getConnectionDescription();
-
-        // authenticate(internalConnection, connectionDescription);
-        // ==
         if (shouldAuthenticate(connectionDescription)) {
-            System.out.println("should authenticate");
             authenticator.authenticate(internalConnection, connectionDescription);
         }
-
-        // no-op to cause authentication
-//        if (shouldAuthenticate(connectionDescription)) {
-//            attemptUnderAuthentication(internalConnection, connectionDescription, () -> null);
-//        }
-
         return completeConnectionDescriptionInitialization(internalConnection, description);
-    }
-
-    @Override
-    public void authenticate(
-            final InternalConnection internalStreamConnection,
-            final ConnectionDescription connectionDescription) {
-        if (shouldAuthenticate(connectionDescription)) {
-            authenticator.authenticate(internalStreamConnection, connectionDescription);
-        }
     }
 
     @Override
@@ -162,13 +142,10 @@ public class InternalStreamConnectionInitializer implements InternalConnectionIn
             final InternalConnection internalConnection,
             final ConnectionDescription connectionDescription,
             final Supplier<T> retryableOperation) {
-//        System.out.println("attempting under authentication");
 
-//
         if (!shouldAuthenticate(connectionDescription)) {
             return retryableOperation.get();
         }
-
         return authenticator.attemptUnderAuthentication(
                 internalConnection,
                 connectionDescription,

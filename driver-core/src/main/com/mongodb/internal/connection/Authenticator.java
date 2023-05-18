@@ -102,7 +102,7 @@ public abstract class Authenticator {
             final InternalConnection internalConnection,
             final ConnectionDescription connectionDescription,
             final Supplier<T> retryableOperation) {
-        // default implementation will retry
+        // this default implementation will retry
         try {
             return retryableOperation.get();
         } catch (MongoCommandException e) {

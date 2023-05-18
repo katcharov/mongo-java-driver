@@ -532,13 +532,14 @@ public class InternalStreamConnection implements InternalConnection {
         }
         return false;
     }
-    public static boolean triggersReauthentication2(@Nullable final Throwable t) {
+
+    public static boolean triggersRetry(@Nullable final Throwable t) {
         if (t instanceof MongoSecurityException) {
             MongoSecurityException e = (MongoSecurityException) t;
             Throwable cause = e.getCause();
             if (cause instanceof MongoCommandException) {
-                MongoCommandException cause2 = (MongoCommandException) cause;
-                return cause2.getErrorCode() == 18; // TODO-OIDC extract constant
+                MongoCommandException commandCause = (MongoCommandException) cause;
+                return commandCause.getErrorCode() == 18; // TODO-OIDC extract constant
             }
         }
         return false;

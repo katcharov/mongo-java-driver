@@ -67,6 +67,7 @@ import static com.mongodb.internal.connection.OidcAuthenticator.AWS_WEB_IDENTITY
 import static java.lang.System.getenv;
 import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -218,6 +219,18 @@ public class OidcAuthenticationProseTests {
                 AWS_OIDC_URL, null, null, Arrays.asList(), null);
         performFind(settings);
     }
+
+    @Test
+    public void automaticAuthSpeculative() {
+        MongoClientSettings settings = createSettings(
+                AWS_OIDC_URL, null, null, Arrays.asList(), null);
+        try (MongoClient mongoClient = createMongoClient(settings)) {
+            // #. Set a fail point for saslStart commands of the form:
+            failCommand(18, 1, "saslStart");
+            performFind(mongoClient);
+        }
+    }
+
 
     @Test
     public void xtest3p1ValidCallbacks() {
@@ -437,24 +450,27 @@ public class OidcAuthenticationProseTests {
     public void test5SpeculativeAuthentication() {
         // #. We can only test the successful case, by verifying that saslStart is not called.
         // #. Create a client with a request callback that returns a valid token that will not expire soon.
-        TestCallback onRequest = createCallback();
-        MongoClientSettings clientSettings = createSettings(OIDC_URL, onRequest, null);
+
+        TestListener listener = new TestListener();
+        TestCallback onRequest = createCallback().setEventListener(listener);
+        TestCommandListener commandListener = new TestCommandListener();
+        commandListener.setEventStrings(listener);
+        MongoClientSettings clientSettings = createSettings(OIDC_URL, onRequest, null, null, commandListener);
+
         try (MongoClient mongoClient = createMongoClient(clientSettings)) {
-            // #. Set a fail point for saslStart commands of the form:
-//            failCommand(18, 2 * 2, "saslStart");
 
-            // #. Perform a find operation that succeeds.
-            performFind(mongoClient);
-            // #. Close the client.
-            // #. Create a new client with the same properties without clearing the cache.
-            // #. Set a fail point for saslStart commands.
-            // #. Perform a find operation that succeeds.
+            // instead of setting failpoints for saslStart, we inspect events
 
-            delayNextFind(); // cause both callbacks to be called
+            delayNextFind();
             executeAll(2, () -> performFind(mongoClient));
-        }
 
-        ///fail(); // TODO-OIDC
+            List<String> events = listener.getEventStrings();
+            assertFalse(events.stream().anyMatch(e -> e.contains("saslStart")));
+            assertTrue(events.stream().anyMatch(e -> e.contains("saslContinue")));
+            // confirm all commands are enabled
+            assertTrue(events.stream().anyMatch(e -> e.contains("isMaster started")) ||
+                    events.stream().anyMatch(e -> e.contains("hello started")));
+        }
     }
 
     @Test
@@ -546,7 +562,6 @@ public class OidcAuthenticationProseTests {
             assertEquals(1, onRequest.getInvocations());
             assertEquals(0, onRefresh.getInvocations());
 
-            events.add("----CLEAR----");
             events.clear();
 
             // Now we need a thread to arrive at AUTHLOCK after a failed find,
@@ -556,14 +571,14 @@ public class OidcAuthenticationProseTests {
             // and passes through AUTHLOCK to populate the cache.
             executeAll(
                     () -> {
-                        events.add("###cachekiller started");
+//                        events.add("###cachekiller started");
                         failCommand(391, 1, "find");
                         performFind(mongoClient);
-                        events.add("###cachekiller finished");
+//                        events.add("###cachekiller finished");
                     },
                     () -> {
                         sleep(500); // TODO-OIDC less time
-                        events.add("----CLEAR222222----");
+//                        events.add("----CLEAR222222----");
                         events.clear();
                         events.add("###retrier started");
 
@@ -600,17 +615,6 @@ public class OidcAuthenticationProseTests {
                 .collect(Collectors.toCollection(ConcurrentLinkedQueue::new));
     }
 
-//    private void performSleepingMapReduce(final MongoClient client, final int ms) {
-//        client
-//                .getDatabase("test")
-//                .getCollection("test")
-//                .mapReduce(
-//                        "function () { emit('a', this.a) }",
-//                        "function (k, v) { return sleep(" + ms + ") || Array.sum(v)}")
-//                .first();
-//    }
-
-
     // TODO-OIDC reauth sasl events must not be logged
 
     @Test
@@ -629,10 +633,12 @@ public class OidcAuthenticationProseTests {
         }
     }
 
+    // 6.3   Retries and Fails with no Cache
+    // cannot be implemented because there is no reasonable way to clear the
+    // TODO-OIDC also, when it reauths, won't it just call onRequest?
 
     @Test
-    public void cannotImplement_test6p3RetriesAndFailsWithNoCache() {
-        // TODO-OIDC speculative auth
+    public void busted_cannotImplement_test6p3RetriesAndFailsWithNoCache() {
         fail();
     }
 
