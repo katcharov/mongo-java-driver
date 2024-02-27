@@ -254,6 +254,13 @@ public final class MongoCredential {
             "*.mongodb.net", "*.mongodb-qa.net", "*.mongodb-dev.net", "*.mongodbgov.net", "localhost", "127.0.0.1", "::1"));
 
     /**
+     * The token audience.
+     *
+     * @since TODO-OIDC update all
+     */
+    public static final String TOKEN_AUDIENCE_KEY = "TOKEN_AUDIENCE";
+
+    /**
      * Creates a MongoCredential instance with an unspecified mechanism.  The client will negotiate the best mechanism based on the
      * version of the server that the client is authenticating to.
      *

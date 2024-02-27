@@ -31,6 +31,8 @@ import com.mongodb.connection.ConnectionDescription;
 import com.mongodb.internal.Locks;
 import com.mongodb.internal.VisibleForTesting;
 import com.mongodb.internal.async.SingleResultCallback;
+import com.mongodb.internal.authentication.AzureCredentialHelper;
+import com.mongodb.internal.authentication.AzureCredentialHelper.AzureCredentialInfo;
 import com.mongodb.lang.Nullable;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
@@ -50,6 +52,7 @@ import java.util.stream.Collectors;
 
 import static com.mongodb.AuthenticationMechanism.MONGODB_OIDC;
 import static com.mongodb.MongoCredential.ALLOWED_HOSTS_KEY;
+import static com.mongodb.MongoCredential.TOKEN_AUDIENCE_KEY;
 import static com.mongodb.MongoCredential.DEFAULT_ALLOWED_HOSTS;
 import static com.mongodb.MongoCredential.IdpInfo;
 import static com.mongodb.MongoCredential.OIDC_HUMAN_CALLBACK_KEY;
@@ -69,11 +72,14 @@ import static java.lang.String.format;
  */
 public final class OidcAuthenticator extends SaslAuthenticator {
 
-    private static final List<String> SUPPORTED_PROVIDERS = Arrays.asList("aws");
+    private static final String AWS_PROVIDER = "aws";
+    private static final String AZURE_PROVIDER = "azure";
+    private static final List<String> SUPPORTED_PROVIDERS = Arrays.asList(AWS_PROVIDER, AZURE_PROVIDER);
 
     private static final Duration CALLBACK_TIMEOUT = Duration.ofMinutes(5);
 
     public static final String AWS_WEB_IDENTITY_TOKEN_FILE = "AWS_WEB_IDENTITY_TOKEN_FILE";
+
     private static final int CALLBACK_API_VERSION_NUMBER = 1;
 
     @Nullable
@@ -113,9 +119,6 @@ public final class OidcAuthenticator extends SaslAuthenticator {
     @Nullable
     public BsonDocument createSpeculativeAuthenticateCommand(final InternalConnection connection) {
         try {
-            if (isAutomaticAuthentication()) {
-                return wrapInSpeculative(prepareAwsTokenFromFileAsJwt());
-            }
             String cachedAccessToken = getCachedAccessToken();
             if (cachedAccessToken != null) {
                 return wrapInSpeculative(prepareTokenAsJwt(cachedAccessToken));
@@ -152,11 +155,8 @@ public final class OidcAuthenticator extends SaslAuthenticator {
         speculativeAuthenticateResponse = response;
     }
 
-    private boolean isAutomaticAuthentication() {
-        return getOidcCallbackMechanismProperty(PROVIDER_NAME_KEY) == null;
-    }
-
     private boolean isHumanCallback() {
+        // built-in providers (aws, azure...) are considered machine callbacks
         return getOidcCallbackMechanismProperty(OIDC_HUMAN_CALLBACK_KEY) != null;
     }
 
@@ -167,10 +167,35 @@ public final class OidcAuthenticator extends SaslAuthenticator {
                 .getMechanismProperty(key, null);
     }
 
-    @Nullable
     private OidcCallback getRequestCallback() {
-        OidcCallback machine = getOidcCallbackMechanismProperty(OIDC_CALLBACK_KEY);
-        return machine != null ? machine : getOidcCallbackMechanismProperty(OIDC_HUMAN_CALLBACK_KEY);
+        String providerName = getProviderName(getMongoCredential());
+        OidcCallback machine;
+        if (AWS_PROVIDER.equals(providerName)) {
+            machine = getAwsCallback();
+        } else if (AZURE_PROVIDER.equals(providerName)) {
+            machine = getAzureCallback();
+        } else {
+            machine = getOidcCallbackMechanismProperty(OIDC_CALLBACK_KEY);
+        }
+        OidcCallback human = getOidcCallbackMechanismProperty(OIDC_HUMAN_CALLBACK_KEY);
+        return machine != null ? machine : assertNotNull(human);
+    }
+
+    private OidcCallback getAwsCallback() {
+        return (context) -> {
+            String accessToken = readAwsTokenFromFile();
+            return new OidcCallbackResult(accessToken, Duration.ZERO);
+        };
+    }
+
+    private OidcCallback getAzureCallback() {
+        return (context) -> {
+            MongoCredential credential = getMongoCredential();
+            String resource = assertNotNull(credential.getMechanismProperty(TOKEN_AUDIENCE_KEY, null));
+            String objectId = credential.getUserName();
+            AzureCredentialInfo response = AzureCredentialHelper.fetchAzureCredentialInfo(resource, objectId);
+            return new OidcCallbackResult(response.getAccessToken(), response.getExpiresIn());
+        };
     }
 
     @Override
@@ -239,16 +264,13 @@ public final class OidcAuthenticator extends SaslAuthenticator {
     }
 
     private byte[] evaluate(final byte[] challenge) {
-        if (isAutomaticAuthentication()) {
-            return prepareAwsTokenFromFileAsJwt();
-        }
         byte[][] jwt = new byte[1][];
         Locks.withLock(getMongoCredentialWithCache().getOidcLock(), () -> {
             OidcCacheEntry oidcCacheEntry = getMongoCredentialWithCache().getOidcCacheEntry();
             String cachedRefreshToken = oidcCacheEntry.getRefreshToken();
             IdpInfo cachedIdpInfo = oidcCacheEntry.getIdpInfo();
             String cachedAccessToken = validatedCachedAccessToken();
-            OidcCallback requestCallback = assertNotNull(getRequestCallback());
+            OidcCallback requestCallback = getRequestCallback();
             boolean isHuman = isHumanCallback();
 
             if (cachedAccessToken != null) {
@@ -367,6 +389,176 @@ public final class OidcAuthenticator extends SaslAuthenticator {
                 .getCachedAccessToken();
     }
 
+    private static String readAwsTokenFromFile() {
+        String path = System.getenv(AWS_WEB_IDENTITY_TOKEN_FILE);
+        if (path == null) {
+            throw new MongoClientException(
+                    format("Environment variable must be specified: %s", AWS_WEB_IDENTITY_TOKEN_FILE));
+        }
+        try {
+            return new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new MongoClientException(format(
+                    "Could not read file specified by environment variable: %s at path: %s",
+                    AWS_WEB_IDENTITY_TOKEN_FILE, path), e);
+        }
+    }
+
+    private byte[] populateCacheWithCallbackResultAndPrepareJwt(
+            @Nullable final IdpInfo serverInfo,
+            @Nullable final OidcCallbackResult oidcCallbackResult) {
+        if (oidcCallbackResult == null) {
+            throw new MongoConfigurationException("Result of callback must not be null");
+        }
+        OidcCacheEntry newEntry = new OidcCacheEntry(oidcCallbackResult.getAccessToken(),
+                oidcCallbackResult.getRefreshToken(), serverInfo);
+        getMongoCredentialWithCache().setOidcCacheEntry(newEntry);
+        return prepareTokenAsJwt(oidcCallbackResult.getAccessToken());
+    }
+
+    private static byte[] prepareUsername(@Nullable final String username) {
+        BsonDocument document = new BsonDocument();
+        if (username != null) {
+            document = document.append("n", new BsonString(username));
+        }
+        return toBson(document);
+    }
+
+    private IdpInfo toIdpInfo(final byte[] challenge) {
+        // validate here to prevent creating IdpInfo for unauthorized hosts
+        validateAllowedHosts(getMongoCredential());
+        BsonDocument c = new RawBsonDocument(challenge);
+        String issuer = c.getString("issuer").getValue();
+        String clientId = c.getString("clientId").getValue();
+        return new IdpInfoImpl(
+                issuer,
+                clientId,
+                getStringArray(c, "requestScopes"));
+    }
+
+    @Nullable
+    private static List<String> getStringArray(final BsonDocument document, final String key) {
+        if (!document.isArray(key)) {
+            return null;
+        }
+        return document.getArray(key).stream()
+                // ignore non-string values from server, rather than error
+                .filter(v -> v.isString())
+                .map(v -> v.asString().getValue())
+                .collect(Collectors.toList());
+    }
+
+    private void validateAllowedHosts(final MongoCredential credential) {
+        List<String> allowedHosts = assertNotNull(credential.getMechanismProperty(ALLOWED_HOSTS_KEY, DEFAULT_ALLOWED_HOSTS));
+        String host = assertNotNull(serverAddress).getHost();
+        boolean permitted = allowedHosts.stream().anyMatch(allowedHost -> {
+            if (allowedHost.startsWith("*.")) {
+                String ending = allowedHost.substring(1);
+                return host.endsWith(ending);
+            } else if (allowedHost.contains("*")) {
+                throw new IllegalArgumentException(
+                        "Allowed host " + allowedHost + " contains invalid wildcard");
+            } else {
+                return host.equals(allowedHost);
+            }
+        });
+        if (!permitted) {
+            throw new MongoSecurityException(
+                    credential, "Host " + host + " not permitted by " + ALLOWED_HOSTS_KEY
+                    + ", values:  " + allowedHosts);
+        }
+    }
+
+    private byte[] prepareTokenAsJwt(final String accessToken) {
+        connectionLastAccessToken = accessToken;
+        return toJwtDocument(accessToken);
+    }
+
+    private static byte[] toJwtDocument(final String accessToken) {
+        return toBson(new BsonDocument().append("jwt", new BsonString(accessToken)));
+    }
+
+    /**
+     * Contains all validation logic for OIDC in one location
+     */
+    public static final class OidcValidator {
+        private OidcValidator() {
+        }
+
+        public static void validateOidcCredentialConstruction(
+                final String source,
+                final Map<String, Object> mechanismProperties) {
+
+            if (!"$external".equals(source)) {
+                throw new IllegalArgumentException("source must be '$external'");
+            }
+
+            String providerName = getProviderName(mechanismProperties);
+            if (providerName != null) {
+                if (!SUPPORTED_PROVIDERS.contains(providerName)) {
+                    throw new IllegalArgumentException(PROVIDER_NAME_KEY + " must be one of: " + SUPPORTED_PROVIDERS);
+                }
+                boolean hasTokenAudienceProperty = mechanismProperties.get(TOKEN_AUDIENCE_KEY) != null;
+                boolean isAzure = "azure".equals(providerName);
+                if (hasTokenAudienceProperty != isAzure) {
+                    throw new IllegalArgumentException(TOKEN_AUDIENCE_KEY
+                            + " must be provided if and only if " + PROVIDER_NAME_KEY + " is 'azure'");
+                }
+            }
+        }
+
+        public static void validateCreateOidcCredential(@Nullable final char[] password) {
+            if (password != null) {
+                throw new IllegalArgumentException("password must not be specified for "
+                        + AuthenticationMechanism.MONGODB_OIDC);
+            }
+        }
+
+        @VisibleForTesting(otherwise = VisibleForTesting.AccessModifier.PRIVATE)
+        public static void validateBeforeUse(final MongoCredential credential) {
+            String userName = credential.getUserName();
+            Object providerName = credential.getMechanismProperty(PROVIDER_NAME_KEY, null);
+            Object machineCallback = credential.getMechanismProperty(OIDC_CALLBACK_KEY, null);
+            Object humanCallback = credential.getMechanismProperty(OIDC_HUMAN_CALLBACK_KEY, null);
+            if (providerName == null) {
+                // callback
+                if (machineCallback == null && humanCallback == null) {
+                    throw new IllegalArgumentException("Either " + PROVIDER_NAME_KEY
+                            + " or " + OIDC_CALLBACK_KEY
+                            + " or " + OIDC_HUMAN_CALLBACK_KEY
+                            + " must be specified");
+                }
+                if (machineCallback != null && humanCallback != null) {
+                    throw new IllegalArgumentException("Both " + OIDC_CALLBACK_KEY
+                            + " and " + OIDC_HUMAN_CALLBACK_KEY
+                            + " must not be specified");
+                }
+            } else {
+                if (userName != null) {
+                    throw new IllegalArgumentException("user name must not be specified when " + PROVIDER_NAME_KEY + " is specified");
+                }
+                if (machineCallback != null) {
+                    throw new IllegalArgumentException(OIDC_CALLBACK_KEY + " must not be specified when " + PROVIDER_NAME_KEY + " is specified");
+                }
+                if (humanCallback != null) {
+                    throw new IllegalArgumentException(OIDC_HUMAN_CALLBACK_KEY + " must not be specified when " + PROVIDER_NAME_KEY + " is specified");
+                }
+            }
+        }
+    }
+
+    @Nullable
+    private static String getProviderName(final Map<String, Object> mechanismProperties) {
+        Object o = mechanismProperties.get(PROVIDER_NAME_KEY.toLowerCase());
+        return o instanceof String ? (String) o : null;
+    }
+
+    @Nullable
+    private static String getProviderName(final MongoCredential credential) {
+        Object o = credential.getMechanismProperty(PROVIDER_NAME_KEY, null);
+        return o instanceof String ? (String) o : null;
+    }
+
     static final class OidcCacheEntry {
         @Nullable
         private final String accessToken;
@@ -426,7 +618,6 @@ public final class OidcAuthenticator extends SaslAuthenticator {
     }
 
     private final class OidcSaslClient extends SaslClientImpl {
-
         private OidcSaslClient(final MongoCredentialWithCache mongoCredentialWithCache) {
             super(mongoCredentialWithCache.getCredential());
         }
@@ -440,167 +631,7 @@ public final class OidcAuthenticator extends SaslAuthenticator {
         public boolean isComplete() {
             return clientIsComplete();
         }
-
     }
-
-    private static String readAwsTokenFromFile() {
-        String path = System.getenv(AWS_WEB_IDENTITY_TOKEN_FILE);
-        if (path == null) {
-            throw new MongoClientException(
-                    format("Environment variable must be specified: %s", AWS_WEB_IDENTITY_TOKEN_FILE));
-        }
-        try {
-            return new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new MongoClientException(format(
-                    "Could not read file specified by environment variable: %s at path: %s",
-                    AWS_WEB_IDENTITY_TOKEN_FILE, path), e);
-        }
-    }
-
-    private byte[] populateCacheWithCallbackResultAndPrepareJwt(
-            @Nullable final IdpInfo serverInfo,
-            @Nullable final OidcCallbackResult oidcCallbackResult) {
-        if (oidcCallbackResult == null) {
-            throw new MongoConfigurationException("Result of callback must not be null");
-        }
-        OidcCacheEntry newEntry = new OidcCacheEntry(oidcCallbackResult.getAccessToken(),
-                oidcCallbackResult.getRefreshToken(), serverInfo);
-        getMongoCredentialWithCache().setOidcCacheEntry(newEntry);
-        return prepareTokenAsJwt(oidcCallbackResult.getAccessToken());
-    }
-
-    private static byte[] prepareUsername(@Nullable final String username) {
-        BsonDocument document = new BsonDocument();
-        if (username != null) {
-            document = document.append("n", new BsonString(username));
-        }
-        return toBson(document);
-    }
-
-    private IdpInfo toIdpInfo(final byte[] challenge) {
-        // validate here to prevent creating IdpInfo for unauthorized hosts
-        validateAllowedHosts(getMongoCredential());
-        BsonDocument c = new RawBsonDocument(challenge);
-        String issuer = c.getString("issuer").getValue();
-        String clientId = c.getString("clientId").getValue();
-        return new IdpInfoImpl(
-                issuer,
-                clientId,
-                getStringArray(c, "requestScopes"));
-    }
-
-
-    @Nullable
-    private static List<String> getStringArray(final BsonDocument document, final String key) {
-        if (!document.isArray(key)) {
-            return null;
-        }
-        return document.getArray(key).stream()
-                // ignore non-string values from server, rather than error
-                .filter(v -> v.isString())
-                .map(v -> v.asString().getValue())
-                .collect(Collectors.toList());
-    }
-
-    private void validateAllowedHosts(final MongoCredential credential) {
-        List<String> allowedHosts = assertNotNull(credential.getMechanismProperty(ALLOWED_HOSTS_KEY, DEFAULT_ALLOWED_HOSTS));
-        String host = assertNotNull(serverAddress).getHost();
-        boolean permitted = allowedHosts.stream().anyMatch(allowedHost -> {
-            if (allowedHost.startsWith("*.")) {
-                String ending = allowedHost.substring(1);
-                return host.endsWith(ending);
-            } else if (allowedHost.contains("*")) {
-                throw new IllegalArgumentException(
-                        "Allowed host " + allowedHost + " contains invalid wildcard");
-            } else {
-                return host.equals(allowedHost);
-            }
-        });
-        if (!permitted) {
-            throw new MongoSecurityException(
-                    credential, "Host " + host + " not permitted by " + ALLOWED_HOSTS_KEY
-                    + ", values:  " + allowedHosts);
-        }
-    }
-
-    private byte[] prepareTokenAsJwt(final String accessToken) {
-        connectionLastAccessToken = accessToken;
-        return toJwtDocument(accessToken);
-    }
-
-    private static byte[] prepareAwsTokenFromFileAsJwt() {
-        String accessToken = readAwsTokenFromFile();
-        return toJwtDocument(accessToken);
-    }
-
-    private static byte[] toJwtDocument(final String accessToken) {
-        return toBson(new BsonDocument().append("jwt", new BsonString(accessToken)));
-    }
-
-    /**
-     * Contains all validation logic for OIDC in one location
-     */
-    public static final class OidcValidator {
-        private OidcValidator() {
-        }
-
-        public static void validateOidcCredentialConstruction(
-                final String source,
-                final Map<String, Object> mechanismProperties) {
-
-            if (!"$external".equals(source)) {
-                throw new IllegalArgumentException("source must be '$external'");
-            }
-
-            Object providerName = mechanismProperties.get(PROVIDER_NAME_KEY.toLowerCase());
-            if (providerName != null) {
-                if (!(providerName instanceof String) || !SUPPORTED_PROVIDERS.contains(providerName)) {
-                    throw new IllegalArgumentException(PROVIDER_NAME_KEY + " must be one of: " + SUPPORTED_PROVIDERS);
-                }
-            }
-        }
-
-        public static void validateCreateOidcCredential(@Nullable final char[] password) {
-            if (password != null) {
-                throw new IllegalArgumentException("password must not be specified for "
-                        + AuthenticationMechanism.MONGODB_OIDC);
-            }
-        }
-
-        @VisibleForTesting(otherwise = VisibleForTesting.AccessModifier.PRIVATE)
-        public static void validateBeforeUse(final MongoCredential credential) {
-            String userName = credential.getUserName();
-            Object providerName = credential.getMechanismProperty(PROVIDER_NAME_KEY, null);
-            Object machineCallback = credential.getMechanismProperty(OIDC_CALLBACK_KEY, null);
-            Object humanCallback = credential.getMechanismProperty(OIDC_HUMAN_CALLBACK_KEY, null);
-            if (providerName == null) {
-                // callback
-                if (machineCallback == null && humanCallback == null) {
-                    throw new IllegalArgumentException("Either " + PROVIDER_NAME_KEY
-                            + " or " + OIDC_CALLBACK_KEY
-                            + " or " + OIDC_HUMAN_CALLBACK_KEY
-                            + " must be specified");
-                }
-                if (machineCallback != null && humanCallback != null) {
-                    throw new IllegalArgumentException("Both " + OIDC_CALLBACK_KEY
-                            + " and " + OIDC_HUMAN_CALLBACK_KEY
-                            + " must not be specified");
-                }
-            } else {
-                if (userName != null) {
-                    throw new IllegalArgumentException("user name must not be specified when " + PROVIDER_NAME_KEY + " is specified");
-                }
-                if (machineCallback != null) {
-                    throw new IllegalArgumentException(OIDC_CALLBACK_KEY + " must not be specified when " + PROVIDER_NAME_KEY + " is specified");
-                }
-                if (humanCallback != null) {
-                    throw new IllegalArgumentException(OIDC_HUMAN_CALLBACK_KEY + " must not be specified when " + PROVIDER_NAME_KEY + " is specified");
-                }
-            }
-        }
-    }
-
 
     @VisibleForTesting(otherwise = VisibleForTesting.AccessModifier.PRIVATE)
     static class OidcCallbackContextImpl implements OidcCallbackContext {
