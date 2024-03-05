@@ -24,6 +24,16 @@ timeout:
         ls -la
 
 functions:
+  "make files executable": #TODO move
+    - command: shell.exec
+      params:
+        script: |
+          set +x
+          ${PREPARE_SHELL}
+          for i in $(find ${DRIVERS_TOOLS}/.evergreen ${PROJECT_DIRECTORY}/.evergreen -name \*.sh); do
+            chmod +x $i
+          done
+
   "fetch source":
     # Executes git clone and applies the submitted patch, if any
     - command: git.get_project
@@ -926,6 +936,22 @@ tasks:
             LOAD_BALANCER: 'true'
         - func: "run load-balancer"
         - func: "run load-balancer tests"
+
+    - name: "oidc-auth-test-azure-latest"
+      commands:
+        - command: shell.exec
+          params:
+            shell: bash
+            script: |-
+              set -o errexit
+              ${PREPARE_SHELL}
+              cd src
+              git add .
+              git commit -m "add files"
+              export AZUREOIDC_DRIVERS_TAR_FILE=/tmp/mongo-java-driver.tgz
+              git archive -o $AZUREOIDC_DRIVERS_TAR_FILE HEAD
+              export AZUREOIDC_TEST_CMD="source ./env.sh && export OIDC_PROVIDER_NAME=azure && ./.evergreen/run-mongodb-oidc-test.sh"
+              bash $DRIVERS_TOOLS/.evergreen/auth_oidc/azure/run-driver-test.sh
 
     - name: serverless-test
       commands:
@@ -1890,6 +1916,7 @@ task_groups:
     setup_group_timeout_secs: 1800
     tasks:
       - test-atlas-search-index-helpers
+
   - name: testgcpkms_task_group
     setup_group_can_fail_task: true
     setup_group_timeout_secs: 1800 # 30 minutes
@@ -1969,6 +1996,7 @@ task_groups:
             $DRIVERS_TOOLS/.evergreen/csfle/azurekms/delete-vm.sh
     tasks:
       - testazurekms-task
+
   - name: test_atlas_task_group
     setup_group:
       - func: fetch source
@@ -1995,6 +2023,31 @@ task_groups:
     setup_group_timeout_secs: 1800
     tasks:
       - test-aws-lambda-deployed
+
+  - name: test_azure_oidc_task_group
+    setup_group:
+      - func: fetch source
+      - func: prepare resources
+      - func: fix absolute paths
+      - func: make files executable
+      - command: subprocess.exec
+        params:
+          binary: bash
+          env:
+            AZUREOIDC_VMNAME_PREFIX: "JAVA_DRIVER"
+          args:
+            - ${DRIVERS_TOOLS}/.evergreen/auth_oidc/azure/create-and-setup-vm.sh
+    teardown_task:
+      - command: subprocess.exec
+        params:
+          binary: bash
+          args:
+            - ${DRIVERS_TOOLS}/.evergreen/auth_oidc/azure/delete-vm.sh
+    setup_group_can_fail_task: true
+    setup_group_timeout_secs: 1800
+    tasks:
+      - oidc-auth-test-azure-latest
+
 
 buildvariants:
 
@@ -2143,6 +2196,13 @@ buildvariants:
   run_on: rhel80-small
   tasks:
     - name: "test_atlas_task_group_search_indexes"
+
+- name: testazureoidc-variant
+  display_name: "Azure OIDC"
+  run_on: ubuntu2004-small
+  tasks:
+    - name: test_azure_oidc_task_group
+      batchtime: 20160 # Use a batchtime of 14 days as suggested by the CSFLE test README
 
 - matrix_name: "aws-auth-test"
   matrix_spec: { ssl: "nossl", jdk: ["jdk8", "jdk17"], version: ["4.4", "5.0", "6.0", "7.0", "latest"], os: "ubuntu",
