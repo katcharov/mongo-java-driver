@@ -282,22 +282,42 @@ abstract class BaseCluster implements Cluster {
     @Nullable
     private ServerTuple selectServer(final ServerSelector serverSelector,
             final ClusterDescription clusterDescription, final Timeout serverSelectionTimeout) {
+
+        Server deprioritizedServer = null; // TODO-MK
+
         return selectServer(
                 serverSelector,
                 clusterDescription,
-                serverAddress -> getServer(serverAddress, serverSelectionTimeout));
+                serverAddress -> getServer(serverAddress, serverSelectionTimeout),
+                deprioritizedServer);
     }
 
     @Nullable
     @VisibleForTesting(otherwise = PRIVATE)
     static ServerTuple selectServer(final ServerSelector serverSelector, final ClusterDescription clusterDescription,
-            final Function<ServerAddress, Server> serverCatalog) {
-        return atMostNRandom(new ArrayList<>(serverSelector.select(clusterDescription)), 2, serverDescription -> {
+            final Function<ServerAddress, Server> serverCatalog, @Nullable final Server deprioritizedServer) {
+        boolean isSharded = clusterDescription.getType() == ClusterType.SHARDED;
+        Server deprioritizedServerImmutable = !isSharded ? null : deprioritizedServer;
+        List<ServerTuple> deprioritizedTuples = new ArrayList<>();
+        Function<ServerDescription, ServerTuple> selectionFunction = serverDescription -> {
             Server server = serverCatalog.apply(serverDescription.getAddress());
-            return server == null ? null : new ServerTuple(server, serverDescription);
-        }).stream()
+            if (server == null) {
+                return null;
+            }
+            ServerTuple serverTuple = new ServerTuple(server, serverDescription);
+            if (server.equals(deprioritizedServerImmutable)) {
+                deprioritizedTuples.add(serverTuple);
+                // skip deprioritized; guaranteed to be set if no others are available
+                return null;
+            }
+            return serverTuple;
+        };
+
+        ArrayList<ServerDescription> descriptionList = new ArrayList<>(serverSelector.select(clusterDescription));
+        return atMostNRandom(descriptionList, 2, selectionFunction).stream()
                 .min(comparingInt(serverTuple -> serverTuple.getServer().operationCount()))
-                .orElse(null);
+                // TODO-MK multiple deprioritized should be ordered by operation count, as above?
+                .orElseGet(() -> deprioritizedTuples.get(0));
     }
 
     /**

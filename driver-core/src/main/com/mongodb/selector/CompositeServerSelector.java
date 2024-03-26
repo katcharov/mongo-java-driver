@@ -59,13 +59,6 @@ public final class CompositeServerSelector implements ServerSelector {
         this.serverSelectors = Collections.unmodifiableList(mergedServerSelectors);
     }
 
-    /**
-     * @return the server selectors list.
-     */
-    public List<ServerSelector> getServerSelectors() {
-        return serverSelectors;
-    }
-
     @Override
     public List<ServerDescription> select(final ClusterDescription clusterDescription) {
         ClusterDescription curClusterDescription = clusterDescription;
@@ -73,8 +66,8 @@ public final class CompositeServerSelector implements ServerSelector {
         for (ServerSelector cur : serverSelectors) {
             choices = cur.select(curClusterDescription);
             curClusterDescription = new ClusterDescription(clusterDescription.getConnectionMode(), clusterDescription.getType(), choices,
-                                                                  clusterDescription.getClusterSettings(),
-                                                                  clusterDescription.getServerSettings());
+                    clusterDescription.getClusterSettings(),
+                    clusterDescription.getServerSettings());
         }
 
         return assertNotNull(choices);

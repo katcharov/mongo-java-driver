@@ -74,8 +74,11 @@ public class ServerSelectionWithinLatencyWindowTest {
     public void shouldPassAllOutcomes() {
         ServerSelector selector = new ReadPreferenceServerSelector(ReadPreference.nearest());
         Map<ServerAddress, List<ServerTuple>> selectionResultsGroupedByServerAddress = IntStream.range(0, iterations)
-                .mapToObj(i -> BaseCluster.selectServer(selector, clusterDescription,
-                        address -> Assertions.assertNotNull(serverCatalog.get(address))))
+                .mapToObj(i -> BaseCluster.selectServer(
+                        selector,
+                        clusterDescription,
+                        address -> Assertions.assertNotNull(serverCatalog.get(address)),
+                        null))
                 .collect(groupingBy(serverTuple -> serverTuple.getServerDescription().getAddress()));
         Map<ServerAddress, BigDecimal> selectionFrequencies = selectionResultsGroupedByServerAddress.entrySet()
                 .stream()
