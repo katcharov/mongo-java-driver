@@ -53,6 +53,7 @@ import com.mongodb.client.model.InsertOneOptions;
 import com.mongodb.client.model.RenameCollectionOptions;
 import com.mongodb.client.model.ReplaceOptions;
 import com.mongodb.client.model.SearchIndexModel;
+import com.mongodb.client.model.SearchIndexType;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.WriteModel;
 import com.mongodb.client.result.DeleteResult;
@@ -811,6 +812,15 @@ class MongoCollectionImpl<TDocument> implements MongoCollection<TDocument> {
     @Override
     public void drop(final ClientSession clientSession, final DropCollectionOptions dropCollectionOptions) {
         executeDrop(clientSession, dropCollectionOptions);
+    }
+
+    @Override
+    public String createSearchIndex(final String indexName, final Bson definition, final SearchIndexType type) {
+        notNull("indexName", indexName); // TODO null?
+        notNull("definition", definition);
+        notNull("type", type);
+
+        return executeCreateSearchIndexes(singletonList(new SearchIndexModel(indexName, definition, type))).get(0);
     }
 
     @Override

@@ -39,6 +39,7 @@ import com.mongodb.client.model.InsertOneOptions;
 import com.mongodb.client.model.RenameCollectionOptions;
 import com.mongodb.client.model.ReplaceOptions;
 import com.mongodb.client.model.SearchIndexModel;
+import com.mongodb.client.model.SearchIndexType;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.WriteModel;
 import com.mongodb.client.result.DeleteResult;
@@ -1406,6 +1407,18 @@ public interface MongoCollection<TDocument> {
      */
     Publisher<Void> drop(ClientSession clientSession, DropCollectionOptions dropCollectionOptions);
 
+    /**
+     * Create an Atlas Search index for the collection.
+     *
+     * @param indexName  the name of the search index to create.
+     * @param definition Atlas Search index mapping definition.
+     * @param type the search index type.
+     * @return a {@link Publisher} with search index name.
+     * @mongodb.server.release TODO
+     * @mongodb.driver.manual reference/command/createSearchIndexes/ Create Search indexes
+     * @since 5.2.0
+     */
+    Publisher<String> createSearchIndex(String indexName, Bson definition, SearchIndexType type);
 
     /**
      * Create an Atlas Search index for the collection.

@@ -551,6 +551,9 @@ case class SyncMongoCollection[T](wrapped: MongoCollection[T]) extends JMongoCol
   override def dropIndexes(clientSession: ClientSession, dropIndexOptions: DropIndexOptions): Unit =
     wrapped.dropIndexes(unwrap(clientSession), dropIndexOptions).toFuture().get()
 
+  override def createSearchIndex(indexName: String, definition: Bson, searchIndexType: SearchIndexType): String =
+    wrapped.createSearchIndex(indexName, definition, searchIndexType).toFuture().get()
+
   override def createSearchIndex(indexName: String, definition: Bson): String =
     wrapped.createSearchIndex(indexName, definition).toFuture().get()
 

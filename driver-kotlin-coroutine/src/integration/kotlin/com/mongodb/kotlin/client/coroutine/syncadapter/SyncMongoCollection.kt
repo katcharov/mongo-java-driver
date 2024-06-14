@@ -48,6 +48,7 @@ import com.mongodb.client.model.InsertOneOptions
 import com.mongodb.client.model.RenameCollectionOptions
 import com.mongodb.client.model.ReplaceOptions
 import com.mongodb.client.model.SearchIndexModel
+import com.mongodb.client.model.SearchIndexType
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.WriteModel
 import com.mongodb.client.result.DeleteResult
@@ -398,6 +399,10 @@ data class SyncMongoCollection<T : Any>(val wrapped: MongoCollection<T>) : JMong
 
     override fun drop(clientSession: ClientSession, dropCollectionOptions: DropCollectionOptions) = runBlocking {
         wrapped.drop(clientSession.unwrapped(), dropCollectionOptions)
+    }
+
+    override fun createSearchIndex(name: String, definition: Bson, type: SearchIndexType) = runBlocking {
+        wrapped.createSearchIndex(name, definition, type)
     }
 
     override fun createSearchIndex(name: String, definition: Bson) = runBlocking {

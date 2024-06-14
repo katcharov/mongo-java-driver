@@ -16,10 +16,10 @@
 
 package org.mongodb.scala
 
-import com.mongodb.client.model.DropCollectionOptions
+import com.mongodb.client.model.{DropCollectionOptions, SearchIndexType}
 
 import java.util
-import com.mongodb.reactivestreams.client.{ MongoCollection => JMongoCollection }
+import com.mongodb.reactivestreams.client.{MongoCollection => JMongoCollection}
 import org.bson.codecs.configuration.CodecRegistry
 import org.mongodb.scala.bson.DefaultHelper.DefaultsTo
 import org.mongodb.scala.bson.conversions.Bson
@@ -1367,6 +1367,20 @@ case class MongoCollection[TResult](private val wrapped: JMongoCollection[TResul
    */
   def drop(clientSession: ClientSession, dropCollectionOptions: DropCollectionOptions): SingleObservable[Unit] =
     wrapped.drop(clientSession, dropCollectionOptions)
+
+  /**
+   * Create an Atlas Search index for the collection.
+   *
+   * @param indexName  the name of the search index to create.
+   * @param definition the search index mapping definition.
+   * @param searchIndexType the search index type.
+   * @return an Observable with the search index name.
+   * @since 5.2.0
+   * @note Requires MongoDB TODO or greater
+   * @see [[https://www.mongodb.com/docs/manual/reference/command/createSearchIndexes/ Create Search Indexes]]
+   */
+  def createSearchIndex(indexName: String, definition: Bson, searchIndexType: SearchIndexType): SingleObservable[String] =
+    wrapped.createSearchIndex(indexName, definition, searchIndexType)
 
   /**
    * Create an Atlas Search index for the collection.

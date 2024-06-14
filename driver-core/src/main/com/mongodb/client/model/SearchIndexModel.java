@@ -31,6 +31,7 @@ public final class SearchIndexModel {
     @Nullable
     private final String name;
     private final Bson definition;
+    private final SearchIndexType type;
 
     /**
      * Construct an instance with the given Atlas Search index mapping definition.
@@ -44,6 +45,7 @@ public final class SearchIndexModel {
     public SearchIndexModel(final Bson definition) {
         this.definition = notNull("definition", definition);
         this.name = null;
+        this.type = SearchIndexType.SEARCH;
     }
 
     /**
@@ -55,6 +57,20 @@ public final class SearchIndexModel {
     public SearchIndexModel(final String name, final Bson definition) {
         this.definition = notNull("definition", definition);
         this.name = notNull("name", name);
+        this.type = SearchIndexType.SEARCH;
+    }
+
+    /**
+     * Construct an instance with the given Atlas Search name, index definition, and type.
+     *
+     * @param name       the search index name.
+     * @param definition the search index mapping definition.
+     * @param type       the search index type.
+     */
+    public SearchIndexModel(final String name, final Bson definition, final SearchIndexType type) {
+        this.definition = notNull("definition", definition);
+        this.name = notNull("name", name);
+        this.type = notNull("type", type);
     }
 
     /**
@@ -76,11 +92,21 @@ public final class SearchIndexModel {
         return name;
     }
 
+    /**
+     * Get the Atlas Search index type.
+     *
+     * @return the search index type.
+     */
+    public SearchIndexType getType() {
+        return type;
+    }
+
     @Override
     public String toString() {
         return "SearchIndexModel{"
                 + "name=" + name
                 + ", definition=" + definition
+                + ", type=" + type.getType()
                 + '}';
     }
 }

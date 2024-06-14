@@ -46,6 +46,7 @@ import com.mongodb.client.model.InsertOneOptions;
 import com.mongodb.client.model.RenameCollectionOptions;
 import com.mongodb.client.model.ReplaceOptions;
 import com.mongodb.client.model.SearchIndexModel;
+import com.mongodb.client.model.SearchIndexType;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.model.WriteModel;
 import com.mongodb.client.result.DeleteResult;
@@ -646,6 +647,12 @@ class SyncMongoCollection<T> implements MongoCollection<T> {
     @Override
     public void drop(final ClientSession clientSession, final DropCollectionOptions dropCollectionOptions) {
         Mono.from(wrapped.drop(unwrap(clientSession), dropCollectionOptions)).contextWrite(CONTEXT).block(TIMEOUT_DURATION);
+    }
+
+    @Override
+    public String createSearchIndex(final String name, final Bson definition, final SearchIndexType type) {
+        return requireNonNull(Mono.from(wrapped.createSearchIndex(name, definition)).contextWrite(CONTEXT)
+                .block(TIMEOUT_DURATION));
     }
 
     @Override

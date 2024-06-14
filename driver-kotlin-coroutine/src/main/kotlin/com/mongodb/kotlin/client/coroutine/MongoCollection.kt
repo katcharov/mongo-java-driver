@@ -37,6 +37,7 @@ import com.mongodb.client.model.InsertOneOptions
 import com.mongodb.client.model.RenameCollectionOptions
 import com.mongodb.client.model.ReplaceOptions
 import com.mongodb.client.model.SearchIndexModel
+import com.mongodb.client.model.SearchIndexType
 import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.WriteModel
 import com.mongodb.client.result.DeleteResult
@@ -1234,6 +1235,18 @@ public class MongoCollection<T : Any>(private val wrapped: JMongoCollection<T>) 
     public suspend fun drop(clientSession: ClientSession, options: DropCollectionOptions = DropCollectionOptions()) {
         wrapped.drop(clientSession.wrapped, options).awaitFirstOrNull()
     }
+
+    /**
+     * Create an Atlas Search index for the collection.
+     *
+     * @param indexName the name of the search index to create.
+     * @param definition the search index mapping definition.
+     * @param type the search index type.
+     * @return the search index name.
+     * @see [Create search indexes](https://www.mongodb.com/docs/manual/reference/command/createSearchIndexes/)
+     */
+    public suspend fun createSearchIndex(indexName: String, definition: Bson, type: SearchIndexType): String =
+        wrapped.createSearchIndex(indexName, definition, type).awaitSingle()
 
     /**
      * Create an Atlas Search index for the collection.
