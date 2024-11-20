@@ -39,6 +39,7 @@ final class UnifiedTestFailureValidator extends UnifiedSyncTest {
             final String directoryName,
             @Nullable final String fileDescription,
             @Nullable final String testDescription,
+            final int attemptNumber,
             final String schemaVersion,
             @Nullable final BsonArray runOnRequirements,
             final BsonArray entitiesArray,
@@ -49,6 +50,7 @@ final class UnifiedTestFailureValidator extends UnifiedSyncTest {
                     directoryName,
                     fileDescription,
                     testDescription,
+                    attemptNumber,
                     schemaVersion,
                     runOnRequirements,
                     entitiesArray,
@@ -66,6 +68,7 @@ final class UnifiedTestFailureValidator extends UnifiedSyncTest {
             @Nullable final String fileDescription,
             @Nullable final String testDescription,
             @Nullable final String directoryName,
+            final int attemptNumber,
             final String schemaVersion,
             @Nullable final BsonArray runOnRequirements,
             final BsonArray entitiesArray,
@@ -77,6 +80,7 @@ final class UnifiedTestFailureValidator extends UnifiedSyncTest {
                         fileDescription,
                         testDescription,
                         directoryName,
+                        attemptNumber,
                         schemaVersion,
                         runOnRequirements,
                         entitiesArray,
@@ -90,6 +94,11 @@ final class UnifiedTestFailureValidator extends UnifiedSyncTest {
     }
 
     private static Collection<Arguments> data() throws URISyntaxException, IOException {
-        return getTestData("unified-test-format/valid-fail");
+        return getTestData("unified-test-format/valid-fail", 1);
+    }
+
+    @Override
+    public int attempts() {
+        return 1;
     }
 }

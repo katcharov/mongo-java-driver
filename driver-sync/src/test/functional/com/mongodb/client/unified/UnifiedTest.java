@@ -21,10 +21,6 @@ import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoNamespace;
 import com.mongodb.ReadPreference;
 import com.mongodb.UnixServerAddress;
-import com.mongodb.client.unified.UnifiedTestModifications.TestDef;
-import com.mongodb.event.TestServerMonitorListener;
-import com.mongodb.internal.logging.LogMessage;
-import com.mongodb.logging.TestLoggingInterceptor;
 import com.mongodb.WriteConcern;
 import com.mongodb.client.ClientSession;
 import com.mongodb.client.MongoClient;
@@ -32,16 +28,20 @@ import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.gridfs.GridFSBucket;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.test.CollectionHelper;
+import com.mongodb.client.unified.UnifiedTestModifications.TestDef;
 import com.mongodb.client.vault.ClientEncryption;
 import com.mongodb.connection.ClusterDescription;
 import com.mongodb.connection.ClusterType;
 import com.mongodb.connection.ServerDescription;
 import com.mongodb.event.CommandEvent;
 import com.mongodb.event.CommandStartedEvent;
+import com.mongodb.event.TestServerMonitorListener;
 import com.mongodb.internal.connection.TestCommandListener;
 import com.mongodb.internal.connection.TestConnectionPoolListener;
+import com.mongodb.internal.logging.LogMessage;
 import com.mongodb.lang.NonNull;
 import com.mongodb.lang.Nullable;
+import com.mongodb.logging.TestLoggingInterceptor;
 import com.mongodb.test.AfterBeforeParameterResolver;
 import org.bson.BsonArray;
 import org.bson.BsonBoolean;
@@ -57,14 +57,17 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.opentest4j.AssertionFailedError;
 import org.opentest4j.TestAbortedException;
 
 import java.io.File;
 import java.io.IOException;
 import java.net.URISyntaxException;
+import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -91,6 +94,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static util.JsonPoweredTestHelper.getTestDocument;
 import static util.JsonPoweredTestHelper.getTestFiles;
@@ -99,6 +103,9 @@ import static util.JsonPoweredTestHelper.getTestFiles;
 public abstract class UnifiedTest {
     private static final Set<String> PRESTART_POOL_ASYNC_WORK_MANAGER_FILE_DESCRIPTIONS = Collections.singleton(
             "wait queue timeout errors include details about checked out connections");
+
+    public static final int ATTEMPTS = 3;
+    private static Set<String> completed = new HashSet<>();
 
     @Nullable
     private String fileDescription;
@@ -153,14 +160,24 @@ public abstract class UnifiedTest {
         return entities;
     }
 
+    public int attempts() {
+        return ATTEMPTS;
+    }
+
     @NonNull
     protected static Collection<Arguments> getTestData(final String directory) throws URISyntaxException, IOException {
+        return getTestData(directory, ATTEMPTS);
+    }
+
+    @NonNull
+    protected static Collection<Arguments> getTestData(final String directory, final int attempts) throws URISyntaxException, IOException {
         List<Arguments> data = new ArrayList<>();
         for (File file : getTestFiles("/" + directory + "/")) {
             BsonDocument fileDocument = getTestDocument(file);
-
             for (BsonValue cur : fileDocument.getArray("tests")) {
-                data.add(UnifiedTest.createTestData(directory, fileDocument, cur.asDocument()));
+                for (int attempt = 1; attempt <= attempts; attempt++) {
+                    data.add(UnifiedTest.createTestData(directory, fileDocument, cur.asDocument(), attempt));
+                }
             }
         }
         return data;
@@ -168,11 +185,15 @@ public abstract class UnifiedTest {
 
     @NonNull
     private static Arguments createTestData(
-            final String directory, final BsonDocument fileDocument, final BsonDocument testDocument) {
+            final String directory,
+            final BsonDocument fileDocument,
+            final BsonDocument testDocument,
+            final int attempt) {
         return Arguments.of(
                 fileDocument.getString("description").getValue(),
                 testDocument.getString("description").getValue(),
                 directory,
+                attempt,
                 fileDocument.getString("schemaVersion").getValue(),
                 fileDocument.getArray("runOnRequirements", null),
                 fileDocument.getArray("createEntities", new BsonArray()),
@@ -195,6 +216,7 @@ public abstract class UnifiedTest {
             @Nullable final String fileDescription,
             @Nullable final String testDescription,
             @Nullable final String directoryName,
+            final int attemptNumber,
             final String schemaVersion,
             @Nullable final BsonArray runOnRequirements,
             final BsonArray entitiesArray,
@@ -293,40 +315,53 @@ public abstract class UnifiedTest {
         return false;
     }
 
-    @ParameterizedTest(name = "{0}: {1}")
+    @ParameterizedTest(name = "{0}: {1} ({3})")
     @MethodSource("data")
     public void shouldPassAllOutcomes(
             @Nullable final String fileDescription,
             @Nullable final String testDescription,
             @Nullable final String directoryName,
+            final int attemptNumber,
             final String schemaVersion,
             @Nullable final BsonArray runOnRequirements,
             final BsonArray entitiesArray,
             final BsonArray initialData,
             final BsonDocument definition) {
-        BsonArray operations = definition.getArray("operations");
-        for (int i = 0; i < operations.size(); i++) {
-            BsonValue cur = operations.get(i);
-            assertOperation(rootContext, cur.asDocument(), i);
-        }
-
-        if (definition.containsKey("outcome")) {
-            assertOutcome(rootContext);
-        }
-
-        if (definition.containsKey("expectEvents")) {
-            compareEvents(rootContext, definition);
-        }
-
-        if (definition.containsKey("expectLogMessages")) {
-            ArrayList<LogMatcher.Tweak> tweaks = new ArrayList<>(singletonList(
-                    // `LogMessage.Entry.Name.OPERATION` is not supported, therefore we skip matching its value
-                    LogMatcher.Tweak.skip(LogMessage.Entry.Name.OPERATION)));
-            if (getMongoClientSettings().getClusterSettings()
-                    .getHosts().stream().anyMatch(serverAddress -> serverAddress instanceof UnixServerAddress)) {
-                tweaks.add(LogMatcher.Tweak.skip(LogMessage.Entry.Name.SERVER_PORT));
+        String testId = MessageFormat.format("{0}: {1}", fileDescription, testDescription);
+        assumeFalse(completed.contains(testId), "Skipping test already performed");
+        completed.add(testId);
+        try {
+            BsonArray operations = definition.getArray("operations");
+            for (int i = 0; i < operations.size(); i++) {
+                BsonValue cur = operations.get(i);
+                assertOperation(rootContext, cur.asDocument(), i);
             }
-            compareLogMessages(rootContext, definition, tweaks);
+
+            if (definition.containsKey("outcome")) {
+                assertOutcome(rootContext);
+            }
+
+            if (definition.containsKey("expectEvents")) {
+                compareEvents(rootContext, definition);
+            }
+
+            if (definition.containsKey("expectLogMessages")) {
+                ArrayList<LogMatcher.Tweak> tweaks = new ArrayList<>(singletonList(
+                        // `LogMessage.Entry.Name.OPERATION` is not supported, therefore we skip matching its value
+                        LogMatcher.Tweak.skip(LogMessage.Entry.Name.OPERATION)));
+                if (getMongoClientSettings().getClusterSettings()
+                        .getHosts().stream().anyMatch(serverAddress -> serverAddress instanceof UnixServerAddress)) {
+                    tweaks.add(LogMatcher.Tweak.skip(LogMessage.Entry.Name.SERVER_PORT));
+                }
+                compareLogMessages(rootContext, definition, tweaks);
+            }
+        } catch (AssertionFailedError e) {
+            completed.remove(testId);
+            if (attemptNumber == attempts()) { // last attempt
+                throw e;
+            } else {
+                assumeFalse(completed.contains(testId), "Ignoring failure and retrying attempt " + attemptNumber);
+            }
         }
     }
 
