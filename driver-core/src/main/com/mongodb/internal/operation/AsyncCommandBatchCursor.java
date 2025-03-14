@@ -73,7 +73,7 @@ class AsyncCommandBatchCursor<T> implements AsyncAggregateResponseBatchCursor<T>
     private final boolean firstBatchEmpty;
     private final ResourceManager resourceManager;
     private final TimeoutMode timeoutMode;
-    private OperationContext operationContext;
+    private final OperationContext.Holder operationContext;
     private final AtomicBoolean processedInitial = new AtomicBoolean();
     private int batchSize;
     private volatile CommandCursorResult<T> commandCursorResult;
@@ -97,8 +97,9 @@ class AsyncCommandBatchCursor<T> implements AsyncAggregateResponseBatchCursor<T>
         this.firstBatchEmpty = commandCursorResult.getResults().isEmpty();
         this.timeoutMode = timeoutMode;
 
-        operationContext = connectionSource.getOperationContext();
+        OperationContext operationContext = connectionSource.getOperationContext();
         operationContext.getTimeoutContext().setMaxTimeOverride(maxTimeMS); // TODO-JAVA-5640 with?
+        this.operationContext = new OperationContext.Holder(operationContext);
 
         AsyncConnection connectionToPin = connectionSource.getServerDescription().getType() == ServerType.LOAD_BALANCER
                 ? connection : null;
@@ -176,7 +177,7 @@ class AsyncCommandBatchCursor<T> implements AsyncAggregateResponseBatchCursor<T>
 
     void checkTimeoutModeAndResetTimeoutContextIfIteration() {
         if (timeoutMode == TimeoutMode.ITERATION) {
-            operationContext = operationContext.withNewlyStartedTimeout();
+            operationContext.restart();
         }
     }
 
@@ -277,16 +278,14 @@ class AsyncCommandBatchCursor<T> implements AsyncAggregateResponseBatchCursor<T>
 
         @Override
         void doClose() {
-            TimeoutContext timeoutContext = operationContext.getTimeoutContext();
-            timeoutContext.resetToDefaultMaxTime();
+            operationContext.resetToDefaultMaxTime();
             if (resetTimeoutWhenClosing) {
-                releaseResourcesAsync(operationContext.withNewlyStartedTimeout(), THEN_DO_NOTHING);
-            } else {
-                releaseResourcesAsync(operationContext, THEN_DO_NOTHING);
+                operationContext.restart();
             }
+            releaseResourcesAsync(THEN_DO_NOTHING);
         }
 
-        private void releaseResourcesAsync(final OperationContext operationContext, final SingleResultCallback<Void> callback) {
+        private void releaseResourcesAsync(final SingleResultCallback<Void> callback) {
             beginAsync().thenRunTryCatchAsyncBlocks(c -> {
                 if (isSkipReleasingServerResourcesOnClose()) {
                     unsetServerCursor();
@@ -296,7 +295,7 @@ class AsyncCommandBatchCursor<T> implements AsyncAggregateResponseBatchCursor<T>
                         getConnection(c2);
                     }).thenConsume((connection, c3) -> {
                         beginAsync().thenRun(c4 -> {
-                            releaseServerResourcesAsync(connection, operationContext, c4);
+                            releaseServerResourcesAsync(connection, c4);
                         }).thenAlwaysRunAndFinish(() -> {
                             connection.release();
                         }, c3);
@@ -347,12 +346,12 @@ class AsyncCommandBatchCursor<T> implements AsyncAggregateResponseBatchCursor<T>
             }
         }
 
-        private void releaseServerResourcesAsync(final AsyncConnection connection, final OperationContext operationContext,
+        private void releaseServerResourcesAsync(final AsyncConnection connection,
                 final SingleResultCallback<Void> callback) {
             beginAsync().thenRun((c) -> {
                 ServerCursor localServerCursor = super.getServerCursor();
                 if (localServerCursor != null) {
-                    killServerCursorAsync(getNamespace(), localServerCursor, connection, operationContext, callback);
+                    killServerCursorAsync(getNamespace(), localServerCursor, connection, callback);
                 } else {
                     c.complete(c);
                 }
@@ -365,7 +364,6 @@ class AsyncCommandBatchCursor<T> implements AsyncAggregateResponseBatchCursor<T>
                 final MongoNamespace namespace,
                 final ServerCursor localServerCursor,
                 final AsyncConnection localConnection,
-                final OperationContext operationContext,
                 final SingleResultCallback<Void> callback) {
             beginAsync().thenRun(c -> {
                 localConnection.commandAsync(
@@ -374,7 +372,7 @@ class AsyncCommandBatchCursor<T> implements AsyncAggregateResponseBatchCursor<T>
                         NoOpFieldNameValidator.INSTANCE,
                         ReadPreference.primary(),
                         new BsonDocumentCodec(),
-                        operationContext,
+                        operationContext.get(),
                         (r, t) -> c.complete(c));
             }).finish(callback);
         }

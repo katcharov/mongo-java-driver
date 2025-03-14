@@ -41,6 +41,26 @@ import static java.util.stream.Collectors.toList;
  * <p>This class is not part of the public API and may be removed or changed at any time</p>
  */
 public class OperationContext {
+
+    public static class Holder {
+        private OperationContext operationContext;
+        public Holder(final OperationContext operationContext) {
+            this.operationContext = operationContext;
+        }
+        public void restart() {
+            operationContext = operationContext.withNewlyStartedTimeout();
+        }
+
+        public void resetToDefaultMaxTime() {
+            TimeoutContext timeoutContext = operationContext.getTimeoutContext();
+            timeoutContext.resetToDefaultMaxTime();
+        }
+
+        public OperationContext get() {
+            return operationContext;
+        }
+    }
+
     private static final AtomicLong NEXT_ID = new AtomicLong(0);
     private final long id;
     private final ServerDeprioritization serverDeprioritization;
