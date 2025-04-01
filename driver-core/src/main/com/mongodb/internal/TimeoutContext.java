@@ -50,6 +50,8 @@ public class TimeoutContext {
     private Timeout computedServerSelectionTimeout;
     private long minRoundTripTimeMS = 0;
 
+    private boolean timeoutHasBeenReset = false;
+
     @Nullable
     private MaxTimeSupplier maxTimeSupplier = null;
 
@@ -88,6 +90,8 @@ public class TimeoutContext {
 
         if (sessionTimeoutContext != null) {
             TimeoutSettings sessionTimeoutSettings = sessionTimeoutContext.timeoutSettings;
+
+            // TODO-JAVA-5640 what is this generationId for, why an exception?
             if (timeoutSettings.getGenerationId() > sessionTimeoutSettings.getGenerationId()) {
                 throw new MongoClientException("Cannot change the timeoutMS during a transaction.");
             }
@@ -149,7 +153,7 @@ public class TimeoutContext {
      * @param onExpired the runnable to run
      */
     public void onExpired(final Runnable onExpired) {
-        Timeout.nullAsInfinite(timeout).onExpired(onExpired);
+        Timeout.nullAsInfinite(getTimeout1()).onExpired(onExpired);
     }
 
     /**
@@ -165,7 +169,7 @@ public class TimeoutContext {
 
     @Nullable
     public Timeout timeoutIncludingRoundTrip() {
-        return timeout == null ? null : timeout.shortenBy(minRoundTripTimeMS, MILLISECONDS);
+        return getTimeout1() == null ? null : getTimeout1().shortenBy(minRoundTripTimeMS, MILLISECONDS);
     }
 
     /**
@@ -175,10 +179,10 @@ public class TimeoutContext {
      * @return timeout to use.
      */
     public long timeoutOrAlternative(final long alternativeTimeoutMS) {
-        if (timeout == null) {
+        if (getTimeout1() == null) {
             return alternativeTimeoutMS;
         } else {
-            return timeout.call(MILLISECONDS,
+            return getTimeout1().call(MILLISECONDS,
                     () -> 0L,
                     (ms) -> ms,
                     () -> throwMongoTimeoutException("The operation exceeded the timeout limit."));
@@ -201,7 +205,7 @@ public class TimeoutContext {
             }
             return;
         }
-        if (timeout == null) {
+        if (getTimeout1() == null) {
             runWithFixedTimeout(timeoutSettings.getMaxTimeMS(), onRemaining);
             return;
         }
@@ -289,7 +293,7 @@ public class TimeoutContext {
 
     public int getConnectTimeoutMs() {
         final long connectTimeoutMS = getTimeoutSettings().getConnectTimeoutMS();
-        return Math.toIntExact(Timeout.nullAsInfinite(timeout).call(MILLISECONDS,
+        return Math.toIntExact(Timeout.nullAsInfinite(getTimeout1()).call(MILLISECONDS,
                 () -> connectTimeoutMS,
                 (ms) -> connectTimeoutMS == 0 ? ms : Math.min(ms, connectTimeoutMS),
                 () -> throwMongoTimeoutException("The operation exceeded the timeout limit.")));
@@ -302,6 +306,7 @@ public class TimeoutContext {
     public void resetTimeoutIfPresent() {
         if (hasTimeoutMS()) {
             timeout = startTimeout(timeoutSettings.getTimeoutMS());
+            timeoutHasBeenReset = true;
         }
     }
 
@@ -313,15 +318,26 @@ public class TimeoutContext {
         if (!isMaintenanceContext) {
             return;
         }
-        timeout = Timeout.nullAsInfinite(timeout).call(NANOSECONDS,
-                () -> timeout,
+        timeout = Timeout.nullAsInfinite(getTimeout1()).call(NANOSECONDS,
+                () -> getTimeout1(),
                 (ms) -> startTimeout(timeoutSettings.getTimeoutMS()),
                 () -> startTimeout(timeoutSettings.getTimeoutMS()));
+
+        timeoutHasBeenReset = true;
     }
+
+
+    private Timeout getTimeout1() {
+        if (timeoutHasBeenReset) {
+            System.out.println("RESET");
+        }
+        return timeout;
+    }
+
 
     public TimeoutContext withAdditionalReadTimeout(final int additionalReadTimeout) {
         // Only used outside timeoutMS usage
-        assertNull(timeout);
+        assertNull(getTimeout1());
 
         // Check existing read timeout is infinite
         if (timeoutSettings.getReadTimeoutMS() == 0) {
@@ -337,7 +353,7 @@ public class TimeoutContext {
         return "TimeoutContext{"
                 + "isMaintenanceContext=" + isMaintenanceContext
                 + ", timeoutSettings=" + timeoutSettings
-                + ", timeout=" + timeout
+                + ", timeout=" + getTimeout1()
                 + ", minRoundTripTimeMS=" + minRoundTripTimeMS
                 + '}';
     }
@@ -354,12 +370,12 @@ public class TimeoutContext {
         return isMaintenanceContext == that.isMaintenanceContext
                 && minRoundTripTimeMS == that.minRoundTripTimeMS
                 && Objects.equals(timeoutSettings, that.timeoutSettings)
-                && Objects.equals(timeout, that.timeout);
+                && Objects.equals(getTimeout1(), that.timeout);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(isMaintenanceContext, timeoutSettings, timeout, minRoundTripTimeMS);
+        return Objects.hash(isMaintenanceContext, timeoutSettings, getTimeout1(), minRoundTripTimeMS);
     }
 
     @Nullable
@@ -391,8 +407,8 @@ public class TimeoutContext {
             return serverSelectionTimeout;
         }
 
-        if (timeout != null && Timeout.earliest(serverSelectionTimeout, timeout) == timeout) {
-            return timeout;
+        if (getTimeout1() != null && Timeout.earliest(serverSelectionTimeout, getTimeout1()) == getTimeout1()) {
+            return getTimeout1();
         }
 
         computedServerSelectionTimeout = serverSelectionTimeout;
@@ -418,7 +434,7 @@ public class TimeoutContext {
 
     @Nullable
     public Timeout getTimeout() {
-        return timeout;
+        return getTimeout1();
     }
 
     public interface MaxTimeSupplier {

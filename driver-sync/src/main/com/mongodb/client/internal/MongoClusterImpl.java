@@ -479,22 +479,22 @@ final class MongoClusterImpl implements MongoCluster {
         ReadWriteBinding getReadWriteBinding(final ReadPreference readPreference,
                 final ReadConcern readConcern, final ClientSession session, final boolean ownsSession) {
 
-            ClusterAwareReadWriteBinding readWriteBinding = new ClusterBinding(cluster,
-                    getReadPreferenceForBinding(readPreference, session), readConcern, getOperationContext(session, readConcern));
+            OperationContext operationContext = new OperationContext(
+                    getRequestContext(),
+                    new ReadConcernAwareNoOpSessionContext(readConcern),
+                    createTimeoutContext(session, executorTimeoutSettings),
+                    serverApi);
+            ClusterAwareReadWriteBinding readWriteBinding = new ClusterBinding(
+                    cluster,
+                    getReadPreferenceForBinding(readPreference, session),
+                    readConcern,
+                    operationContext);
 
             if (crypt != null) {
                 readWriteBinding = new CryptBinding(readWriteBinding, crypt);
             }
 
             return new ClientSessionBinding(session, ownsSession, readWriteBinding);
-        }
-
-        private OperationContext getOperationContext(final ClientSession session, final ReadConcern readConcern) {
-            return new OperationContext(
-                    getRequestContext(),
-                    new ReadConcernAwareNoOpSessionContext(readConcern),
-                    createTimeoutContext(session, executorTimeoutSettings),
-                    serverApi);
         }
 
         private RequestContext getRequestContext() {

@@ -178,8 +178,10 @@ public class OperationExecutorImpl implements OperationExecutor {
             final ReadPreference readPreference, final ReadConcern readConcern, final ClientSession session,
             final boolean ownsSession) {
         notNull("readPreference", readPreference);
-        AsyncClusterAwareReadWriteBinding readWriteBinding = new AsyncClusterBinding(mongoClient.getCluster(),
-                getReadPreferenceForBinding(readPreference, session), readConcern,
+        AsyncClusterAwareReadWriteBinding readWriteBinding = new AsyncClusterBinding(
+                mongoClient.getCluster(),
+                getReadPreferenceForBinding(readPreference, session),
+                readConcern,
                 getOperationContext(requestContext, session, readConcern));
 
         Crypt crypt = mongoClient.getCrypt();

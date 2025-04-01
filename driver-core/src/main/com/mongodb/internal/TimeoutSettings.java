@@ -16,6 +16,7 @@
 package com.mongodb.internal;
 
 import com.mongodb.MongoClientSettings;
+import com.mongodb.annotations.Immutable;
 import com.mongodb.lang.Nullable;
 
 import java.util.Objects;
@@ -30,6 +31,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  *
  * <p>Includes all client based timeouts</p>
  */
+@Immutable
 public class TimeoutSettings {
     private static final AtomicLong NEXT_ID = new AtomicLong(0);
     private final long generationId;
