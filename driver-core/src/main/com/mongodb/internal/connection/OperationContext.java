@@ -30,6 +30,8 @@ import com.mongodb.internal.session.SessionContext;
 import com.mongodb.lang.Nullable;
 import com.mongodb.selector.ServerSelector;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -111,8 +113,31 @@ public class OperationContext {
     public RequestContext getRequestContext() {
         return requestContext;
     }
+    public static String getStackTraceAsString(final Exception e) { // TODO remove
+        StringWriter sw = new StringWriter();
+        PrintWriter pw = new PrintWriter(sw);
+        e.printStackTrace(pw);
+        return sw.toString();
+    }
 
     public TimeoutContext getTimeoutContext() {
+        try {
+            throw new RuntimeException("CALLED getTimeout");
+        } catch (Exception e) {
+            String trace = getStackTraceAsString(e);
+            boolean print = true;
+            if (trace.contains("DefaultServerMonitor$ServerMonitor.run")) {
+                print = false;
+            }
+            if (trace.contains("internal.connection.BaseCluster.selectServer")) {
+                print = false;
+            }
+            if (print) {
+                e.printStackTrace();
+                System.err.println("------");
+            }
+        }
+
         return timeoutContext;
     }
 

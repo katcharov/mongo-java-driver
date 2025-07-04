@@ -43,7 +43,7 @@ public class MongoBatchCursorAdapter<T> implements MongoCursor<T> {
     }
 
     @Override
-    public void close() {
+    public void close() { // TODO-JAVA-5640 overrides public, cannot be removed
         batchCursor.close();
     }
 
