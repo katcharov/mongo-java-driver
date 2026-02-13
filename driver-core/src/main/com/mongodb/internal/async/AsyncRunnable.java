@@ -18,8 +18,6 @@ package com.mongodb.internal.async;
 
 import com.mongodb.internal.TimeoutContext;
 import com.mongodb.internal.async.function.AsyncCallbackLoop;
-import com.mongodb.internal.async.function.LoopState;
-import com.mongodb.internal.async.function.RetryState;
 import com.mongodb.internal.async.function.RetryingAsyncCallbackSupplier;
 
 import java.util.function.BooleanSupplier;
@@ -119,6 +117,17 @@ import java.util.function.Supplier;
 @FunctionalInterface
 public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> {
 
+    /**
+     * Maximum number of consecutive synchronous iterations in {@link #loopWhile}
+     * before forcing asynchronous scheduling to prevent blocking.
+     * This limit can be configured via the system property
+     * "com.mongodb.async.loopWhile.syncIterationLimit".
+     */
+    int SYNC_ITERATION_LIMIT = Integer.getInteger(
+            "com.mongodb.async.loopWhile.syncIterationLimit",
+            100
+    );
+
     static AsyncRunnable beginAsync() {
         return (c) -> c.complete(c);
     }
@@ -207,6 +216,96 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
     }
 
     /**
+     * @param condition The condition to check before each iteration
+     * @param body      The body to run on each iteration
+     * @return the composition of this runnable and the loop, a runnable
+     */
+    default AsyncRunnable loopWhile(final BooleanSupplier condition, final AsyncRunnable body) {
+        return (callback) -> {
+            this.unsafeFinish((r, e) -> {
+                if (e != null) {
+                    callback.completeExceptionally(e);
+                    return;
+                }
+                final int running = 0;
+                final int syncSuccess = 1;
+                final int syncError = 2;
+                final int asyncPending = 3;
+
+                Runnable[] loop = new Runnable[1];
+                final int[] syncIterationCount = {0};
+                loop[0] = () -> {
+                    while (true) {
+                        boolean shouldContinue;
+                        try {
+                            shouldContinue = condition.getAsBoolean();
+                        } catch (Throwable t) {
+                            callback.completeExceptionally(t);
+                            return;
+                        }
+                        if (!shouldContinue) {
+                            callback.complete(callback);
+                            return;
+                        }
+                        int[] state = {running};
+                        try {
+                            body.unsafeFinish((r2, e2) -> {
+                                if (e2 != null) {
+                                    callback.completeExceptionally(e2);
+                                    state[0] = syncError;
+                                    return;
+                                }
+                                if (state[0] == running) {
+                                    state[0] = syncSuccess;
+                                } else {
+                                    // Async completion - reset iteration counter
+                                    syncIterationCount[0] = 0;
+                                    try {
+                                        loop[0].run();
+                                    } catch (Throwable t2) {
+                                        callback.completeExceptionally(t2);
+                                    }
+                                }
+                            });
+                        } catch (Throwable t) {
+                            if (state[0] == running) {
+                                callback.completeExceptionally(t);
+                                state[0] = syncError;
+                            }
+                        }
+                        if (state[0] == syncSuccess) {
+                            // Sync completion - check if we need to trampoline to prevent blocking
+                            syncIterationCount[0]++;
+                            if (syncIterationCount[0] >= SYNC_ITERATION_LIMIT) {
+                                // Force async scheduling to yield the thread
+                                syncIterationCount[0] = 0;
+                                try {
+                                    java.util.concurrent.CompletableFuture.runAsync(() -> {
+                                        try {
+                                            loop[0].run();
+                                        } catch (Throwable t2) {
+                                            callback.completeExceptionally(t2);
+                                        }
+                                    });
+                                } catch (Throwable t2) {
+                                    callback.completeExceptionally(t2);
+                                }
+                                return;
+                            }
+                            continue;
+                        }
+                        if (state[0] == running) {
+                            state[0] = asyncPending;
+                        }
+                        return;
+                    }
+                };
+                loop[0].run();
+            });
+        };
+    }
+
+    /**
      * @param supplier The supplier to supply using after this runnable
      * @return the composition of this runnable and the supplier, a supplier
      * @param <R> The return type of the resulting supplier
@@ -231,15 +330,19 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
      */
     default AsyncRunnable thenRunRetryingWhile(
             final TimeoutContext timeoutContext, final AsyncRunnable runnable, final Predicate<Throwable> shouldRetry) {
-        return thenRun(callback -> {
-            new RetryingAsyncCallbackSupplier<Void>(
-                    new RetryState(timeoutContext),
-                    (rs, lastAttemptFailure) -> shouldRetry.test(lastAttemptFailure),
-                    // `finish` is required here instead of `unsafeFinish`
-                    // because only `finish` meets the contract of
-                    // `AsyncCallbackSupplier.get`, which we implement here
-                    cb -> runnable.finish(cb)
-            ).get(callback);
+        return this.thenRun(c -> {
+            final boolean[] shouldContinue = new boolean[]{true};
+            beginAsync().loopWhile(() -> shouldContinue[0], c2 -> {
+                beginAsync().thenRun(runnable)
+                    .thenRun(c3 -> {
+                        shouldContinue[0] = false;
+                        c3.complete(c3);
+                    })
+                    .onErrorIf(shouldRetry, (e, c3) -> {
+                        c3.complete(c3);
+                    })
+                    .finish(c2);
+            }).finish(c);
         });
     }
 
@@ -253,22 +356,6 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
      * @see AsyncCallbackLoop
      */
     default AsyncRunnable thenRunDoWhileLoop(final AsyncRunnable loopBodyRunnable, final BooleanSupplier whileCheck) {
-        return thenRun(finalCallback -> {
-            LoopState loopState = new LoopState();
-            new AsyncCallbackLoop(loopState, iterationCallback -> {
-
-                loopBodyRunnable.finish((result, t) -> {
-                    if (t != null) {
-                        iterationCallback.completeExceptionally(t);
-                        return;
-                    }
-                    if (loopState.breakAndCompleteIf(() -> !whileCheck.getAsBoolean(), iterationCallback)) {
-                        return;
-                    }
-                    iterationCallback.complete(iterationCallback);
-                });
-
-            }).run(finalCallback);
-        });
+        return this.thenRun(loopBodyRunnable).loopWhile(whileCheck, loopBodyRunnable);
     }
 }

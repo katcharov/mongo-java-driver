@@ -286,7 +286,7 @@ public abstract class AsyncFunctionsTestBase {
 
     protected <T> T await(final CompletableFuture<T> voidCompletableFuture, final String errorMessage) {
         try {
-            return voidCompletableFuture.get(1, TimeUnit.MINUTES);
+            return voidCompletableFuture.get(3, TimeUnit.SECONDS);
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
             throw new AssertionError(errorMessage);
         }

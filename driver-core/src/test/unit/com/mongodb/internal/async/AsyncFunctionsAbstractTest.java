@@ -724,7 +724,84 @@ abstract class AsyncFunctionsAbstractTest extends AsyncFunctionsTestBase {
     }
 
     @Test
+    void testWhile() {
+        assertBehavesSameVariations(10, // TODO check expected variations
+                () -> {
+                    int i = 0;
+                    while (i < 3 && plainTest(i)) {
+                        i++;
+                        sync(i);
+                    }
+                },
+                (callback) -> {
+                    final int[] i = new int[1];
+                    beginAsync().loopWhile(() -> i[0] < 3 && plainTest(i[0]), (c2) -> {
+                        i[0]++;
+                        async(i[0], c2);
+                    }).finish(callback);
+                });
+    }
+
+    @Test
+    void testWhile2() {
+        assertBehavesSameVariations(14, // TODO check expected variations
+                () -> {
+                    int i = 0;
+                    while (i < 3 && plainTest(i)) {
+                        i++;
+                        sync(i);
+                    }
+                    sync(i + 100);
+                },
+                (callback) -> {
+                    final int[] i = new int[1];
+                    beginAsync().thenRun(c -> {
+                        beginAsync().loopWhile(() -> i[0] < 3 && plainTest(i[0]), (c2) -> {
+                            i[0]++;
+                            async(i[0], c2);
+                        }).finish(c);
+                    }).thenRun(c -> {
+                        async(i[0] + 100, c);
+                    }).finish(callback);
+                });
+    }
+
+
+    @Test
     void testRetryLoop() {
+        assertBehavesSameVariations(InvocationTracker.DEPTH_LIMIT * 2 + 1,
+                () -> {
+                    while (true) {
+                        try {
+                            sync(plainTest(0) ? 1 : 2);
+                        } catch (RuntimeException e) {
+                            if (e.getMessage().equals("exception-1")) {
+                                continue;
+                            }
+                            throw e;
+                        }
+                        break;
+                    }
+                },
+                (callback) -> {
+                    final boolean[] shouldContinue = new boolean[]{true};
+                    beginAsync().loopWhile(() -> shouldContinue[0], (c) -> {
+                        beginAsync().thenRun(c2 -> {
+                            async(plainTest(0) ? 1 : 2, c2);
+                        }).thenRun(c2 -> {
+                            shouldContinue[0] = false;
+                            c2.complete(c2);
+                        }).onErrorIf(e -> e.getMessage().equals("exception-1"), (e, c2) -> {
+                            c2.complete(c2);
+                        }).finish(c);
+                    }).finish(callback);
+                });
+    }
+
+
+    @Test
+    void testThenRunRetryingWhile() {
+        for (int i = 0; i < 1000; i++) {
         assertBehavesSameVariations(InvocationTracker.DEPTH_LIMIT * 2 + 1,
                 () -> {
                     while (true) {
@@ -746,10 +823,11 @@ abstract class AsyncFunctionsAbstractTest extends AsyncFunctionsTestBase {
                             e -> e.getMessage().equals("exception-1")
                     ).finish(callback);
                 });
-    }
+    }}
 
     @Test
     void testDoWhileLoop() {
+        for (int i = 0; i < 1000; i++) {
         assertBehavesSameVariations(67,
                 () -> {
                     do {
@@ -766,7 +844,7 @@ abstract class AsyncFunctionsAbstractTest extends AsyncFunctionsTestBase {
                           () -> plainTest(2)
                     ).finish(finalCallback);
                 });
-    }
+    }}
 
     @Test
     void testFinallyWithPlainInsideTry() {
