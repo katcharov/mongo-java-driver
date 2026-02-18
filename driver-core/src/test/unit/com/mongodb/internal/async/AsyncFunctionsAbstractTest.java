@@ -771,7 +771,6 @@ abstract class AsyncFunctionsAbstractTest extends AsyncFunctionsTestBase {
 
 
     @Test
-    @Disabled("Tests AsyncRunnable.loopWhile, but we agreed to improve and test AsyncRunnable.thenRunDoWhileLoop")
     void testWhile_2() {
         assertBehavesSameVariations(10, // TODO check expected variations
                 () -> {
@@ -791,7 +790,6 @@ abstract class AsyncFunctionsAbstractTest extends AsyncFunctionsTestBase {
     }
 
     @Test
-    @Disabled("Tests AsyncRunnable.loopWhile, but we agreed to improve and test AsyncRunnable.thenRunDoWhileLoop")
     void testWhile2_2() {
         assertBehavesSameVariations(14, // TODO check expected variations
                 () -> {
@@ -816,7 +814,6 @@ abstract class AsyncFunctionsAbstractTest extends AsyncFunctionsTestBase {
     }
 
     @Test
-    @Disabled("Tests AsyncRunnable.loopWhile, but we agreed to improve and test AsyncRunnable.thenRunDoWhileLoop")
     void testRetryLoop() {
         assertBehavesSameVariations(InvocationTracker.DEPTH_LIMIT * 2 + 1,
                 () -> {
@@ -1170,7 +1167,7 @@ abstract class AsyncFunctionsAbstractTest extends AsyncFunctionsTestBase {
     }
 
     @Test
-    @Disabled("Tests AsyncRunnable.thenRun/finish, but we agreed to improve and test AsyncRunnable.thenRunDoWhileLoop")
+    @Disabled("This is for testing thenRun stack reduction")
     void testStackDepthBounded() {
         AtomicInteger maxDepth = new AtomicInteger(0);
         AtomicInteger minDepth = new AtomicInteger(Integer.MAX_VALUE);
