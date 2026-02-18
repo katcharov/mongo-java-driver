@@ -135,6 +135,14 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
     );
 
     /**
+     * When {@code true}, the loop in {@link #loopWhile} trampolines to a different thread
+     * (via {@link java.util.concurrent.CompletableFuture#runAsync(Runnable)}) whenever it
+     * would resume on an async callback's thread. This prevents deadlocks when the loop body
+     * blocks on a resource owned by that thread (e.g., a single-thread executor).
+     */
+    boolean TRAMPOLINE_ON_ASYNC_RESUMPTION = true;
+
+    /**
      * Tracks whether the body's callback was invoked synchronously
      * (before {@code unsafeFinish} returned) or asynchronously (after).
      */
@@ -395,12 +403,26 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
 
     default AsyncRunnable loopWhile(final BooleanSupplier condition, final AsyncRunnable body) {
         return (callback) -> {
+            final Thread callerThread = TRAMPOLINE_ON_ASYNC_RESUMPTION ? Thread.currentThread() : null;
             this.unsafeFinish((r, e) -> {
                 if (e != null) {
                     callback.completeExceptionally(e);
                     return;
                 }
                 class Loop implements Runnable {
+                    void trampolineOrRun() {
+                        try {
+                            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                                try {
+                                    run();
+                                } catch (Throwable t) {
+                                    callback.completeExceptionally(t);
+                                }
+                            });
+                        } catch (Throwable t) {
+                            callback.completeExceptionally(t);
+                        }
+                    }
                     @Override
                     public void run() {
                         while (true) {
@@ -433,11 +455,15 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
                                         return;
                                     }
                                     if (!state.compareAndSet(RUNNING, SYNC_SUCCESS)) {
-                                        // body completed asynchronously — resume the loop on this thread
-                                        try {
-                                            Loop.this.run();
-                                        } catch (Throwable t2) {
-                                            callback.completeExceptionally(t2);
+                                        // body completed asynchronously — resume the loop
+                                        if (TRAMPOLINE_ON_ASYNC_RESUMPTION) {
+                                            Loop.this.trampolineOrRun();
+                                        } else {
+                                            try {
+                                                Loop.this.run();
+                                            } catch (Throwable t2) {
+                                                callback.completeExceptionally(t2);
+                                            }
                                         }
                                     }
                                     // else: sync completion — the while-loop will continue
@@ -461,7 +487,12 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
                         }
                     }
                 }
-                new Loop().run();
+                Loop loop = new Loop();
+                if (TRAMPOLINE_ON_ASYNC_RESUMPTION && Thread.currentThread() != callerThread) {
+                    loop.trampolineOrRun();
+                } else {
+                    loop.run();
+                }
             });
         };
     }
