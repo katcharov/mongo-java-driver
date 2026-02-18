@@ -16,14 +16,19 @@
 
 package com.mongodb.internal.async;
 
-import com.mongodb.assertions.Assertions;
 import com.mongodb.internal.TimeoutContext;
 import com.mongodb.internal.async.function.AsyncCallbackLoop;
 import com.mongodb.internal.async.function.RetryingAsyncCallbackSupplier;
 
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+
+import static com.mongodb.internal.async.AsyncRunnable.BodyState.ASYNC_PENDING;
+import static com.mongodb.internal.async.AsyncRunnable.BodyState.RUNNING;
+import static com.mongodb.internal.async.AsyncRunnable.BodyState.SYNC_ERROR;
+import static com.mongodb.internal.async.AsyncRunnable.BodyState.SYNC_SUCCESS;
 
 /**
  * <p>See the test code (AsyncFunctionsTest) for API usage.
@@ -129,6 +134,17 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
             100
     );
 
+    /**
+     * Tracks whether the body's callback was invoked synchronously
+     * (before {@code unsafeFinish} returned) or asynchronously (after).
+     */
+    enum BodyState {
+        RUNNING,
+        SYNC_SUCCESS,
+        SYNC_ERROR,
+        ASYNC_PENDING
+    }
+
     static AsyncRunnable beginAsync() {
         return (c) -> c.complete(c);
     }
@@ -221,18 +237,13 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
      * @param body      The body to run on each iteration
      * @return the composition of this runnable and the loop, a runnable
      */
-    default AsyncRunnable loopWhile(final BooleanSupplier condition, final AsyncRunnable body) {
+    default AsyncRunnable loopWhile_advanced(final BooleanSupplier condition, final AsyncRunnable body) {
         return (callback) -> {
             this.unsafeFinish((r, e) -> {
                 if (e != null) {
                     callback.completeExceptionally(e);
                     return;
                 }
-                final int running = 0;
-                final int syncSuccess = 1;
-                final int syncError = 2;
-                final int asyncPending = 3;
-
                 Runnable[] loop = new Runnable[1];
                 final int[] syncIterationCount = {0};
                 loop[0] = () -> {
@@ -248,18 +259,18 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
                             callback.complete(callback);
                             return;
                         }
-                        int[] state = {running};
+                        AtomicReference<BodyState> state = new AtomicReference<>(RUNNING);
                         try {
                             body.unsafeFinish((r2, e2) -> {
                                 if (e2 != null) {
+                                    state.compareAndSet(RUNNING, SYNC_ERROR);
                                     callback.completeExceptionally(e2);
-                                    state[0] = syncError;
                                     return;
                                 }
-                                if (state[0] == running) {
-                                    state[0] = syncSuccess;
+                                if (state.compareAndSet(RUNNING, SYNC_SUCCESS)) {
+                                    // body completed synchronously — signal the while-loop
                                 } else {
-                                    // Async completion - reset iteration counter
+                                    // body completed asynchronously — resume the loop on this thread
                                     syncIterationCount[0] = 0;
                                     try {
                                         loop[0].run();
@@ -269,12 +280,16 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
                                 }
                             });
                         } catch (Throwable t) {
-                            if (state[0] == running) {
+                            if (state.compareAndSet(RUNNING, SYNC_ERROR)) {
                                 callback.completeExceptionally(t);
-                                state[0] = syncError;
                             }
                         }
-                        if (state[0] == syncSuccess) {
+                        if (state.compareAndSet(RUNNING, ASYNC_PENDING)) {
+                            // body has not completed yet — yield and let the callback drive
+                            return;
+                        }
+                        // callback already completed — check outcome
+                        if (state.get() == SYNC_SUCCESS) {
                             // Sync completion - check if we need to trampoline to prevent blocking
                             syncIterationCount[0]++;
                             if (syncIterationCount[0] >= SYNC_ITERATION_LIMIT) {
@@ -295,10 +310,196 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
                             }
                             continue;
                         }
-                        if (state[0] == running) {
-                            state[0] = asyncPending;
-                        }
+                        // SYNC_ERROR — callback already reported it
                         return;
+                    }
+                };
+                loop[0].run();
+            });
+        };
+    }
+
+    default AsyncRunnable loopWhile_lambda(final BooleanSupplier condition, final AsyncRunnable body) {
+        return (callback) -> {
+            this.unsafeFinish((r, e) -> {
+                if (e != null) {
+                    callback.completeExceptionally(e);
+                    return;
+                }
+                Runnable[] loop = new Runnable[1];
+                loop[0] = () -> {
+                    while (true) {
+                        boolean shouldContinue;
+                        try {
+                            shouldContinue = condition.getAsBoolean();
+                        } catch (Throwable t) {
+                            callback.completeExceptionally(t);
+                            return;
+                        }
+                        if (!shouldContinue) {
+                            callback.complete(callback);
+                            return;
+                        }
+
+                        // State protocol: both the loop thread and the callback use CAS
+                        // to transition `state` from RUNNING. Exactly one thread wins:
+                        // - If the callback wins (RUNNING → SYNC_SUCCESS/SYNC_ERROR),
+                        //   the loop thread's CAS fails and it reads the result directly.
+                        // - If the loop thread wins (RUNNING → ASYNC_PENDING),
+                        //   the callback sees ASYNC_PENDING and re-enters the loop via run().
+                        AtomicReference<BodyState> state = new AtomicReference<>(RUNNING);
+                        try {
+                            body.unsafeFinish((r2, e2) -> {
+                                if (e2 != null) {
+                                    if (state.compareAndSet(RUNNING, SYNC_ERROR)) {
+                                        callback.completeExceptionally(e2);
+                                    } else {
+                                        callback.completeExceptionally(e2);
+                                    }
+                                    return;
+                                }
+                                if (state.compareAndSet(RUNNING, SYNC_SUCCESS)) {
+                                    // body completed synchronously — signal the while-loop
+                                } else {
+                                    // body completed asynchronously — resume the loop on this thread
+                                    try {
+                                        loop[0].run();
+                                    } catch (Throwable t2) {
+                                        callback.completeExceptionally(t2);
+                                    }
+                                }
+                            });
+                        } catch (Throwable t) {
+                            if (state.compareAndSet(RUNNING, SYNC_ERROR)) {
+                                callback.completeExceptionally(t);
+                            }
+                            // else: callback already transitioned from RUNNING
+                        }
+                        if (state.compareAndSet(RUNNING, ASYNC_PENDING)) {
+                            // body has not completed yet — yield and let the callback drive
+                            return;
+                        }
+                        // callback already completed — check outcome
+                        if (state.get() == SYNC_SUCCESS) {
+                            continue;
+                        }
+                        // SYNC_ERROR — callback already reported it
+                        return;
+                    }
+                };
+                loop[0].run();
+            });
+        };
+    }
+
+
+    default AsyncRunnable loopWhile(final BooleanSupplier condition, final AsyncRunnable body) {
+        return (callback) -> {
+            this.unsafeFinish((r, e) -> {
+                if (e != null) {
+                    callback.completeExceptionally(e);
+                    return;
+                }
+                class Loop implements Runnable {
+                    @Override
+                    public void run() {
+                        while (true) {
+                            boolean shouldContinue;
+                            try {
+                                shouldContinue = condition.getAsBoolean();
+                            } catch (Throwable t) {
+                                callback.completeExceptionally(t);
+                                return;
+                            }
+                            if (!shouldContinue) {
+                                callback.complete(callback);
+                                return;
+                            }
+
+                            // State protocol: both the loop thread and the callback use CAS
+                            // to transition `state` from RUNNING. Exactly one thread wins:
+                            // - If the callback wins (RUNNING → SYNC_SUCCESS/SYNC_ERROR),
+                            //   the loop thread's CAS fails and it reads the result directly.
+                            // - If the loop thread wins (RUNNING → ASYNC_PENDING),
+                            //   the callback sees ASYNC_PENDING and re-enters the loop via run().
+                            AtomicReference<BodyState> state = new AtomicReference<>(RUNNING);
+                            try {
+                                body.unsafeFinish((r2, e2) -> {
+                                    if (e2 != null) {
+                                        // Always report: this thread holds the body's result,
+                                        // regardless of whether the loop thread already set ASYNC_PENDING.
+                                        state.compareAndSet(RUNNING, SYNC_ERROR);
+                                        callback.completeExceptionally(e2);
+                                        return;
+                                    }
+                                    if (!state.compareAndSet(RUNNING, SYNC_SUCCESS)) {
+                                        // body completed asynchronously — resume the loop on this thread
+                                        try {
+                                            Loop.this.run();
+                                        } catch (Throwable t2) {
+                                            callback.completeExceptionally(t2);
+                                        }
+                                    }
+                                    // else: sync completion — the while-loop will continue
+                                });
+                            } catch (Throwable t) {
+                                // Only report if we win the CAS: if the callback already
+                                // transitioned from RUNNING, it owns the result.
+                                if (state.compareAndSet(RUNNING, SYNC_ERROR)) {
+                                    callback.completeExceptionally(t);
+                                }
+                            }
+                            if (state.compareAndSet(RUNNING, ASYNC_PENDING)) {
+                                // body has not completed yet — yield and let the callback drive
+                                return;
+                            } else if (state.get() == SYNC_SUCCESS) {
+                                continue;
+                            } else {
+                                // SYNC_ERROR — callback already reported it
+                                return;
+                            }
+                        }
+                    }
+                }
+                new Loop().run();
+            });
+        };
+    }
+
+    default AsyncRunnable loopWhile_recursive(final BooleanSupplier condition, final AsyncRunnable body) {
+        return (callback) -> {
+            this.unsafeFinish((r, e) -> {
+                if (e != null) {
+                    callback.completeExceptionally(e);
+                    return;
+                }
+                Runnable[] loop = new Runnable[1];
+                loop[0] = () -> {
+                    boolean shouldContinue;
+                    try {
+                        shouldContinue = condition.getAsBoolean();
+                    } catch (Throwable t) {
+                        callback.completeExceptionally(t);
+                        return;
+                    }
+                    if (!shouldContinue) {
+                        callback.complete(callback);
+                        return;
+                    }
+                    try {
+                        body.unsafeFinish((r2, e2) -> {
+                            if (e2 != null) {
+                                callback.completeExceptionally(e2);
+                                return;
+                            }
+                            try {
+                                loop[0].run();
+                            } catch (Throwable t2) {
+                                callback.completeExceptionally(t2);
+                            }
+                        });
+                    } catch (Throwable t) {
+                        callback.completeExceptionally(t);
                     }
                 };
                 loop[0].run();
