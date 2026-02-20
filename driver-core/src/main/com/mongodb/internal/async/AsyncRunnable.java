@@ -430,18 +430,24 @@ public interface AsyncRunnable extends AsyncSupplier<Void>, AsyncConsumer<Void> 
                         try {
                             body.unsafeFinish((r2, e2) -> {
                                 if (e2 != null) {
-                                    // Always report: this thread holds the body's result,
-                                    // regardless of whether the loop thread already set ASYNC_PENDING.
-                                    state.compareAndSet(RUNNING, SYNC_ERROR);
-                                    callback.completeExceptionally(e2);
+                                    // Report unless the catch block already set SYNC_ERROR
+                                    // (which means unsafeFinish threw after launching async work).
+                                    if (state.compareAndSet(RUNNING, SYNC_ERROR)
+                                            || state.get() == ASYNC_PENDING) {
+                                        callback.completeExceptionally(e2);
+                                    }
                                     return;
                                 }
                                 if (!state.compareAndSet(RUNNING, SYNC_SUCCESS)) {
-                                    // body completed asynchronously — resume the loop
-                                    try {
-                                        run();
-                                    } catch (Throwable t2) {
-                                        callback.completeExceptionally(t2);
+                                    // Only resume if the loop thread set ASYNC_PENDING.
+                                    // If the catch block set SYNC_ERROR (unsafeFinish threw
+                                    // after launching async work), it already reported the error.
+                                    if (state.get() == ASYNC_PENDING) {
+                                        try {
+                                            run();
+                                        } catch (Throwable t2) {
+                                            callback.completeExceptionally(t2);
+                                        }
                                     }
                                 }
                                 // else: sync completion — the while-loop will continue
